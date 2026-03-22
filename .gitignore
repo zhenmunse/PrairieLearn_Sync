@@ -1,1 +1,2 @@
-local
+# Ignore all content in the root 'local' folder
+/local/
