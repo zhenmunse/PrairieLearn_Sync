@@ -1,0 +1,16 @@
+# Core dependencies for app.py (Streamlit GUI) and sync_pipeline.py (CLI pipeline)
+
+# Web application framework
+streamlit>=1.30.0
+
+# Data processing
+pandas>=2.0.0
+
+# HTTP client (used by sync_pipeline.py for the Canvas API)
+requests>=2.31.0
+
+# GitHub API client (used by app.py for repository navigation and PR creation)
+PyGithub>=2.1.1
+
+# Timezone database with DST support (used by app.py for timezone-aware scheduling)
+pytz>=2024.1

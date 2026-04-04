@@ -1,0 +1,28 @@
+<pl-question-panel>
+  <i>This question is from Quiz 1 Question 8 of ECS32A Gradescope</i>
+    
+  <p>Consider the following program which should get a floating-point price from the user and an integer tip rate to compute the price with the tip.</p>
+ 
+  <p>You should be able to replace the blanks so that the program works without error and performs as intended. Do not modify any of the existing code.</p>
+
+<pl-code language="python">
+price = input("Enter total:")
+tip_rate = input("Tip rate:") # in percent, not decimal
+# ----------------------------------------------------
+# Write your data type conversion statements below:
+</pl-code>
+</pl-question-panel>
+
+<pl-file-editor 
+    file-name="student_code.py" 
+    ace-mode="ace/mode/python" 
+    ace-theme="ace/theme/textmate">
+</pl-file-editor>
+
+<pl-question-panel>
+<pl-code language="python">
+# ----------------------------------------------------
+tip = price * (tip_rate / 100)
+print("The price with tip is:", price + tip)
+</pl-code>
+</pl-question-panel>

@@ -1,0 +1,42 @@
+{
+  "uuid": "b418a870-ac57-4434-a0c3-f523b253163b",
+  "type": "Exam",
+  "title": "Practice Quiz 1",
+  "set": "Practice Quiz",
+  "number": "1",
+  "allowAccess": [
+    {
+      "mode": "Exam",
+      "startDate": "2026-04-09T10:00:00",
+      "endDate": "2026-04-09T10:50:00",
+      "clientNetworks": ["169.237.128.160/27", "169.237.128.192/28", "169.237.128.208/29"],
+      "uids": ["student1@ucdavis.edu", "student2@ucdavis.edu"]
+    },
+    {
+      "mode": "Exam",
+      "startDate": "2026-04-09T11:00:00",
+      "endDate": "2026-04-09T11:50:00",
+      "clientNetworks": ["169.237.128.160/27", "169.237.128.192/28", "169.237.128.208/29"],
+      "uids": ["student3@ucdavis.edu", "student4@ucdavis.edu"]
+    }
+  ],
+  "zones": [
+    {
+      "title": "Honor Statement",
+      "maxPoints": 0,
+      "questions": [{ "id": "honor_statement", "autoPoints": 1 }]
+    },
+    {
+      "title": "Practice Quiz 1",
+      "maxPoints": 40,
+      "questions": [
+        { "id": "pq1/q1", "autoPoints": 5 },
+        { "id": "pq1/q2", "autoPoints": 4 },
+        { "id": "pq1/q3", "autoPoints": 5 },
+        { "id": "pq1/q4", "autoPoints": 6 },
+        { "id": "pq1/q5", "autoPoints": 10 },
+        { "id": "pq1/q6", "autoPoints": 10 }
+      ]
+    }
+  ]
+}
