@@ -383,85 +383,138 @@ st.caption(f"Target file: `{json_path}`")
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Step 3 — Roster Upload & Column Mapping
+# Step 3 — Roster Input (CSV upload or manual email list)
 # ---------------------------------------------------------------------------
 
 st.header("Step 3 — Upload Canvas Roster and Assign Time Slots")
 
-csv_file = st.file_uploader(
-    "Canvas Roster CSV",
-    type=["csv"],
-    help="Export from Canvas > Grades > Export (.csv).",
+roster_mode = st.radio(
+    "Roster input method",
+    options=["CSV Upload", "Manual Entry"],
+    horizontal=True,
+    help=(
+        "CSV Upload: import students grouped by section from a Canvas export.  "
+        "Manual Entry: paste a list of email addresses with a single shared time slot."
+    ),
 )
 
-if csv_file is None:
-    st.info("Upload a Canvas Roster CSV to continue.")
-    st.stop()
+grouped: dict
+sections: list
 
-try:
-    df_raw = load_csv_dataframe(csv_file)
-except ValueError as exc:
-    st.error(f"CSV Error: {exc}")
-    st.stop()
-
-if df_raw.empty:
-    st.error("The uploaded CSV contains no rows.")
-    st.stop()
-
-csv_columns = df_raw.columns.tolist()
-
-col_sec, col_email = st.columns(2)
-
-with col_sec:
-    section_col_guess = next(
-        (c for c in csv_columns if "section" in c.lower()), csv_columns[0]
-    )
-    section_col = st.selectbox(
-        "Section column",
-        options=csv_columns,
-        index=csv_columns.index(section_col_guess),
-        help="The column that identifies which section a student belongs to.",
+if roster_mode == "CSV Upload":
+    csv_file = st.file_uploader(
+        "Canvas Roster CSV",
+        type=["csv"],
+        help="Export from Canvas > Grades > Export (.csv).",
     )
 
-with col_email:
-    email_col_guess = next(
-        (
-            c
-            for c in csv_columns
-            if "email" in c.lower()
-            or "sis login" in c.lower()
-            or "login id" in c.lower()
-        ),
-        csv_columns[0],
+    if csv_file is None:
+        st.info("Upload a Canvas Roster CSV to continue.")
+        st.stop()
+
+    try:
+        df_raw = load_csv_dataframe(csv_file)
+    except ValueError as exc:
+        st.error(f"CSV Error: {exc}")
+        st.stop()
+
+    if df_raw.empty:
+        st.error("The uploaded CSV contains no rows.")
+        st.stop()
+
+    csv_columns = df_raw.columns.tolist()
+
+    col_sec, col_email = st.columns(2)
+
+    with col_sec:
+        section_col_guess = next(
+            (c for c in csv_columns if "section" in c.lower()), csv_columns[0]
+        )
+        section_col = st.selectbox(
+            "Section column",
+            options=csv_columns,
+            index=csv_columns.index(section_col_guess),
+            help="The column that identifies which section a student belongs to.",
+        )
+
+    with col_email:
+        email_col_guess = next(
+            (
+                c
+                for c in csv_columns
+                if "email" in c.lower()
+                or "sis login" in c.lower()
+                or "login id" in c.lower()
+            ),
+            csv_columns[0],
+        )
+        email_col = st.selectbox(
+            "Email / UID column",
+            options=csv_columns,
+            index=csv_columns.index(email_col_guess),
+            help="The column that contains the student email or SIS Login ID.",
+        )
+
+    if section_col == email_col:
+        st.warning("Section column and Email column must be different.")
+        st.stop()
+
+    # Parse and group students
+    df = df_raw[[section_col, email_col]].copy()
+    df[email_col] = df[email_col].astype(str).str.strip()
+    df = df[df[email_col].notna() & (df[email_col] != "") & (df[email_col] != "nan")]
+    grouped = df.groupby(section_col)[email_col].apply(list).to_dict()
+    sections = sorted(grouped.keys())
+
+    if not sections:
+        st.error(
+            "No sections were found after parsing the CSV. "
+            "Check the column mapping."
+        )
+        st.stop()
+
+    st.success(
+        f"Found **{len(sections)} section(s)** across **{len(df)} student(s)**."
     )
-    email_col = st.selectbox(
-        "Email / UID column",
-        options=csv_columns,
-        index=csv_columns.index(email_col_guess),
-        help="The column that contains the student email or SIS Login ID.",
+
+else:
+    # Manual Entry mode — no section concept, one shared time slot
+    raw_input = st.text_area(
+        "Student emails / UIDs",
+        height=200,
+        placeholder="student1@ucdavis.edu\nstudent2@ucdavis.edu\n...",
+        help="Enter one email address (or PrairieLearn UID) per line.",
     )
 
-if section_col == email_col:
-    st.warning("Section column and Email column must be different.")
-    st.stop()
+    emails: list[str] = [
+        line.strip()
+        for line in raw_input.splitlines()
+        if line.strip()
+    ]
 
-# Parse and group students
-df = df_raw[[section_col, email_col]].copy()
-df[email_col] = df[email_col].astype(str).str.strip()
-df = df[df[email_col].notna() & (df[email_col] != "") & (df[email_col] != "nan")]
-grouped: dict = df.groupby(section_col)[email_col].apply(list).to_dict()
-sections = sorted(grouped.keys())
+    if not emails:
+        st.info("Enter at least one student email to continue.")
+        st.stop()
 
-if not sections:
-    st.error(
-        "No sections were found after parsing the CSV. "
-        "Check the column mapping."
-    )
-    st.stop()
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_emails: list[str] = []
+    for e in emails:
+        if e not in seen:
+            seen.add(e)
+            unique_emails.append(e)
 
-st.success(
-    f"Found **{len(sections)} section(s)** across **{len(df)} student(s)**."
-)
+    if len(unique_emails) < len(emails):
+        st.warning(
+            f"{len(emails) - len(unique_emails)} duplicate(s) removed. "
+            f"Using {len(unique_emails)} unique address(es)."
+        )
+
+    _MANUAL_SECTION = "Manual"
+    grouped = {_MANUAL_SECTION: unique_emails}
+    sections = [_MANUAL_SECTION]
+
+    st.success(f"**{len(unique_emails)} student(s)** will share one time slot.")
 
 st.divider()
 
@@ -504,7 +557,10 @@ st.caption(
 
 # Table header row
 hdr0, hdr1, hdr2, hdr3, hdr4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
-hdr0.markdown("**Section**")
+if roster_mode == "CSV Upload":
+    hdr0.markdown("**Section**")
+else:
+    hdr0.markdown("**Students**")
 hdr1.markdown("**Date**")
 hdr2.markdown("**Start**")
 hdr3.markdown("**End**")
@@ -516,10 +572,15 @@ default_date = datetime.date.today()
 
 for section in sections:
     col0, col1, col2, col3, col4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
-    student_count = len(grouped[section])
 
     with col0:
-        with st.expander(f"{section}  ({student_count} students)"):
+        student_count = len(grouped[section])
+        expander_label = (
+            f"{student_count} students"
+            if section == "Manual"
+            else f"{section}  ({student_count} students)"
+        )
+        with st.expander(expander_label):
             st.dataframe(
                 pd.DataFrame(grouped[section], columns=["Email / UID"]),
                 use_container_width=True,
