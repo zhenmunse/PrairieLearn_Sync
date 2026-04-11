@@ -77,3 +77,6 @@ ehthumbs.db
 
 # Generated output files (not committed to source control)
 infoAssessment.json
+
+# Saved credentials (local persistence)
+.pl_credentials.json
