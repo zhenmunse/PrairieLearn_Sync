@@ -20,6 +20,8 @@ import pytz
 import streamlit as st
 from github import Github, GithubException, UnknownObjectException
 
+from audit_log import audit
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -27,7 +29,6 @@ from github import Github, GithubException, UnknownObjectException
 JSON_FILE_NAME = "infoAssessment.json"
 
 # SDC default parameters (easily editable)
-SDC_DEFAULT_LOCATION = "TLC2216"
 SDC_BASE_EXAM_MIN = 50  # fallback base exam length (minutes)
 
 # Credential persistence — stores repo URL & PAT in a local JSON file
@@ -140,6 +141,67 @@ def load_csv_dataframe(uploaded_file) -> pd.DataFrame:
         return pd.read_csv(uploaded_file)
     except Exception as exc:
         raise ValueError(f"Cannot read CSV: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Date / time option helpers for combobox-style selectboxes
+# ---------------------------------------------------------------------------
+
+def _next_weekday(start: datetime.date, weekday: int = 0) -> datetime.date:
+    """Return the next date with the given weekday (0=Monday)."""
+    days_ahead = weekday - start.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    return start + datetime.timedelta(days=days_ahead)
+
+
+def _build_date_options(
+    num_days: int = 90,
+) -> tuple[list[str], list[datetime.date]]:
+    """
+    Generate a list of upcoming dates formatted as 'YYYY-MM-DD (Mon)'
+    for use in a searchable selectbox.  Returns (labels, date_objects).
+    """
+    today = datetime.date.today()
+    labels: list[str] = []
+    dates: list[datetime.date] = []
+    for i in range(num_days):
+        d = today + datetime.timedelta(days=i)
+        labels.append(d.strftime("%Y-%m-%d (%a)"))
+        dates.append(d)
+    return labels, dates
+
+
+def _build_time_options(
+    step_min: int = 5,
+) -> tuple[list[str], list[datetime.time]]:
+    """
+    Generate a list of times at *step_min*-minute intervals formatted as
+    'HH:MM' for use in a searchable selectbox.
+    Returns (labels, time_objects).
+    """
+    labels: list[str] = []
+    times: list[datetime.time] = []
+    total_slots = (24 * 60) // step_min
+    for i in range(total_slots):
+        minutes = i * step_min
+        t = datetime.time(minutes // 60, minutes % 60)
+        labels.append(t.strftime("%H:%M"))
+        times.append(t)
+    return labels, times
+
+
+# Pre-compute option lists (shared across all section rows)
+_DATE_LABELS, _DATE_VALUES = _build_date_options()
+_TIME_LABELS, _TIME_VALUES = _build_time_options()
+
+# Default slot: next Monday 10:00-10:50
+_DEFAULT_DATE = _next_weekday(datetime.date.today(), weekday=0)
+_DEFAULT_DATE_IDX = (
+    _DATE_VALUES.index(_DEFAULT_DATE) if _DEFAULT_DATE in _DATE_VALUES else 0
+)
+_DEFAULT_START_IDX = _TIME_LABELS.index("10:00")
+_DEFAULT_END_IDX = _TIME_LABELS.index("10:50")
 
 
 def _normalize_name(name: str) -> str:
@@ -290,8 +352,6 @@ def build_allow_access(
                 "uids": sorted(sg["uids"]),
                 "showClosedAssessment": False,
             }
-            if sg.get("location"):
-                sdc_entry["location"] = sg["location"]
             entries.append(sdc_entry)
 
     return entries
@@ -337,7 +397,6 @@ def build_pr_body(
             sdc_block_lines.append(
                 f"- **{mult_label} group** ({len(sg['uids'])} students): "
                 f"timeLimitMin={sg['timeLimitMin']}, "
-                f"location={sg.get('location', 'N/A')}, "
                 f"showClosedAssessment=false"
             )
 
@@ -433,6 +492,12 @@ with st.sidebar:
                         # Persist credentials locally
                         _save_credentials(
                             repo_url_input.strip(), pat_input.strip()
+                        )
+
+                        audit(
+                            "auth",
+                            detail=f"Connected to {repo_obj.full_name}",
+                            pat=pat_input.strip(),
                         )
 
                     except UnknownObjectException:
@@ -644,6 +709,12 @@ if roster_mode == "CSV Upload":
         st.info("Upload a Canvas Roster CSV to continue.")
         st.stop()
 
+    audit(
+        "file_upload",
+        detail=f"Canvas Roster CSV: {csv_file.name}",
+        meta={"file_name": csv_file.name, "size_bytes": csv_file.size},
+    )
+
     try:
         df_raw = load_csv_dataframe(csv_file)
     except ValueError as exc:
@@ -741,6 +812,11 @@ if roster_mode == "CSV Upload":
     )
 
     if sdc_csv is not None:
+        audit(
+            "file_upload",
+            detail=f"SDC Multiplier CSV: {sdc_csv.name}",
+            meta={"file_name": sdc_csv.name, "size_bytes": sdc_csv.size},
+        )
         try:
             sdc_df = load_csv_dataframe(sdc_csv)
         except ValueError as exc:
@@ -899,7 +975,6 @@ hdr4.markdown("**DST Offset**")
 st.divider()
 
 slot_configs: dict[str, dict] = {}
-default_date = datetime.date.today()
 
 for section in sections:
     col0, col1, col2, col3, col4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
@@ -919,30 +994,34 @@ for section in sections:
             )
 
     with col1:
-        chosen_date = st.date_input(
+        _date_sel = st.selectbox(
             "Date",
-            value=default_date,
+            options=_DATE_LABELS,
+            index=_DEFAULT_DATE_IDX,
             key=f"date_{section}",
             label_visibility="collapsed",
         )
+        chosen_date = _DATE_VALUES[_DATE_LABELS.index(_date_sel)]
 
     with col2:
-        chosen_start = st.time_input(
+        _start_sel = st.selectbox(
             "Start",
-            value=datetime.time(10, 0),
+            options=_TIME_LABELS,
+            index=_DEFAULT_START_IDX,
             key=f"start_{section}",
             label_visibility="collapsed",
-            step=300,
         )
+        chosen_start = _TIME_VALUES[_TIME_LABELS.index(_start_sel)]
 
     with col3:
-        chosen_end = st.time_input(
+        _end_sel = st.selectbox(
             "End",
-            value=datetime.time(10, 50),
+            options=_TIME_LABELS,
+            index=_DEFAULT_END_IDX,
             key=f"end_{section}",
             label_visibility="collapsed",
-            step=300,
         )
+        chosen_end = _TIME_VALUES[_TIME_LABELS.index(_end_sel)]
 
     with col4:
         # Resolve DST for this section's specific exam date
@@ -996,7 +1075,7 @@ if sdc_matched:
     with sdc_col1:
         sdc_date = st.date_input(
             "SDC exam date",
-            value=default_date,
+            value=_DEFAULT_DATE,
             key="sdc_date",
         )
         st.markdown(
@@ -1010,12 +1089,6 @@ if sdc_matched:
             key="sdc_last_exam_start",
             step=300,
             help="The start time of the last regular exam session of the day.",
-        )
-        sdc_location = st.text_input(
-            "Location",
-            value=SDC_DEFAULT_LOCATION,
-            key="sdc_location",
-            help="Room code for the SDC exam location.",
         )
 
     # DST offset for SDC date
@@ -1063,7 +1136,6 @@ if sdc_matched:
             "end_date": _end_dt.date(),
             "timeLimitMin": computed_min,
             "multiplier": mult,
-            "location": sdc_location.strip(),
         })
 
 st.divider()
@@ -1211,6 +1283,21 @@ if st.button(
     # --- 7. Success ---
     st.success("Pull Request created successfully.")
     st.markdown(f"**Pull Request URL:** {pr.html_url}")
+
+    audit(
+        "submission",
+        detail=f"PR #{pr.number} for {selected_assessment}",
+        meta={
+            "repo": repo.full_name,
+            "branch": branch_name,
+            "pr_number": pr.number,
+            "pr_url": pr.html_url,
+            "assessment": selected_assessment,
+            "term": selected_term,
+            "sections": len(sections),
+            "sdc_groups": len(sdc_groups) if sdc_groups else 0,
+        },
+    )
 
     with st.expander("Committed infoAssessment.json — full preview", expanded=True):
         st.code(updated_content, language="json")

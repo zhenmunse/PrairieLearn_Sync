@@ -80,3 +80,6 @@ infoAssessment.json
 
 # Saved credentials (local persistence)
 .pl_credentials.json
+
+# Audit logs
+logs/
