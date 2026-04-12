@@ -334,6 +334,7 @@ def build_allow_access(
         _section_limit = max(int((_end_dt - _start_dt).total_seconds() / 60), 1)
         entries.append(
             {
+                "comment": section,
                 "startDate": combine_datetime(cfg["date"], cfg["start"]),
                 "endDate": combine_datetime(cfg["date"], cfg["end"]),
                 "uids": sorted(grouped[section]),
@@ -350,6 +351,7 @@ def build_allow_access(
             if not sg.get("uids"):
                 continue
             sdc_entry: dict = {
+                "comment": f"SDC Accommodations ({sg['multiplier']}x)",
                 "startDate": combine_datetime(sg["date"], sg["start"]),
                 "endDate": combine_datetime(
                     sg.get("end_date", sg["date"]), sg["end"]
@@ -361,6 +363,16 @@ def build_allow_access(
                 "showClosedAssessmentScore": False,
             }
             entries.append(sdc_entry)
+
+    # Global fallback: hide grades until instructor releases them
+    entries.append(
+        {
+            "comment": "So students can't see their grade until we set a designated time later",
+            "active": False,
+            "showClosedAssessment": False,
+            "showClosedAssessmentScore": False,
+        }
+    )
 
     return entries
 
