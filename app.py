@@ -320,28 +320,23 @@ def build_allow_access(
     Construct the allowAccess array from the per-section schedule.
 
     If *sdc_groups* is provided, one block per multiplier group is appended
-    with extended timeLimitMin and showClosedAssessment=false.
+    with its own computed timeLimitMin and showClosedAssessment=false.
 
     Each dict in sdc_groups must contain:
         uids, date, start, end, timeLimitMin, multiplier
     """
-    # Default subnets (e.g., TLC2212)
-    default_networks = [
-        "169.237.128.160/27",
-        "169.237.128.192/28",
-        "169.237.128.208/29",
-    ]
-
     entries = []
     for section in sections:
         cfg = slot_configs[section]
         entries.append(
             {
-                "mode": "Exam",
                 "startDate": combine_datetime(cfg["date"], cfg["start"]),
                 "endDate": combine_datetime(cfg["date"], cfg["end"]),
                 "uids": sorted(grouped[section]),
-                "networks": default_networks,
+                "credit": 100,
+                "timeLimitMin": 50,
+                "showClosedAssessment": False,
+                "showClosedAssessmentScore": False,
             }
         )
 
@@ -350,17 +345,16 @@ def build_allow_access(
         for sg in sdc_groups:
             if not sg.get("uids"):
                 continue
-            # Omit 'networks' to allow SDC students flexibility across
-            # different physical labs (e.g., TLC2216 during OH)
             sdc_entry: dict = {
-                "mode": "Exam",
                 "startDate": combine_datetime(sg["date"], sg["start"]),
                 "endDate": combine_datetime(
                     sg.get("end_date", sg["date"]), sg["end"]
                 ),
-                "timeLimitMin": sg["timeLimitMin"],
                 "uids": sorted(sg["uids"]),
+                "credit": 100,
+                "timeLimitMin": sg["timeLimitMin"],
                 "showClosedAssessment": False,
+                "showClosedAssessmentScore": False,
             }
             entries.append(sdc_entry)
 
