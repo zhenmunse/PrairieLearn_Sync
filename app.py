@@ -328,13 +328,17 @@ def build_allow_access(
     entries = []
     for section in sections:
         cfg = slot_configs[section]
+        # Compute timeLimitMin from the section's own start/end window
+        _start_dt = datetime.datetime.combine(cfg["date"], cfg["start"])
+        _end_dt = datetime.datetime.combine(cfg["date"], cfg["end"])
+        _section_limit = max(int((_end_dt - _start_dt).total_seconds() / 60), 1)
         entries.append(
             {
                 "startDate": combine_datetime(cfg["date"], cfg["start"]),
                 "endDate": combine_datetime(cfg["date"], cfg["end"]),
                 "uids": sorted(grouped[section]),
                 "credit": 100,
-                "timeLimitMin": 50,
+                "timeLimitMin": _section_limit,
                 "showClosedAssessment": False,
                 "showClosedAssessmentScore": False,
             }
