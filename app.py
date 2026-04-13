@@ -159,14 +159,18 @@ def _build_date_options(
     num_days: int = 90,
 ) -> tuple[list[str], list[datetime.date]]:
     """
-    Generate a list of upcoming dates formatted as 'YYYY-MM-DD (Mon)'
-    for use in a searchable selectbox.  Returns (labels, date_objects).
+    Generate a list of dates formatted as 'YYYY-MM-DD (Mon)' for selectbox.
+    Includes 3 days in the past + num_days future to account for timezone
+    differences between server and client. Returns (labels, date_objects).
     """
     today = datetime.date.today()
     labels: list[str] = []
     dates: list[datetime.date] = []
-    for i in range(num_days):
-        d = today + datetime.timedelta(days=i)
+    # Start 3 days ago to cover timezone offsets (UTC vs. local time)
+    start_date = today - datetime.timedelta(days=3)
+    total_days = 3 + num_days
+    for i in range(total_days):
+        d = start_date + datetime.timedelta(days=i)
         labels.append(d.strftime("%Y-%m-%d (%a)"))
         dates.append(d)
     return labels, dates
