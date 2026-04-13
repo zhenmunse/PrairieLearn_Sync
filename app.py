@@ -196,6 +196,7 @@ _DATE_LABELS, _DATE_VALUES = _build_date_options()
 _TIME_LABELS, _TIME_VALUES = _build_time_options()
 
 # Default slot: next Monday 10:00-10:50
+# But users can select any date in the 90-day range, including today
 _DEFAULT_DATE = _next_weekday(datetime.date.today(), weekday=0)
 _DEFAULT_DATE_IDX = (
     _DATE_VALUES.index(_DEFAULT_DATE) if _DEFAULT_DATE in _DATE_VALUES else 0
