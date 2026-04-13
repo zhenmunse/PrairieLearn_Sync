@@ -358,7 +358,7 @@ def detect_anomalies(
                     f"UNAUTHORIZED: Student [{ev.uid}] is not on the "
                     f"exam roster but is active on IP {ev.current_ip}"
                 ),
-                timestamp=now,
+                timestamp=ev.last_active,
             ))
 
         # Rule 2: Roster student logged in from outside the lab network
@@ -375,7 +375,7 @@ def detect_anomalies(
                     f"exam from an IP outside the configured lab CIDRs "
                     f"({ev.current_ip})"
                 ),
-                timestamp=now,
+                timestamp=ev.last_active,
             ))
 
     # Rule 3: Multiple UIDs sharing the same lab IP
@@ -383,13 +383,16 @@ def detect_anomalies(
         if len(uids) > 1 and ip in ip_seat_map:
             seat_label = ip_seat_map[ip].label
             uid_list = ", ".join(uids)
+            # Use the most recent last_active time from conflicting sessions
+            conflicting_events = [ev for ev in events if ev.current_ip == ip and ev.status == "in_progress"]
+            alert_time = max((ev.last_active for ev in conflicting_events), default=now)
             alerts.append(Alert(
                 severity="critical",
                 message=(
                     f"DUPLICATE IP: Seat {seat_label} ({ip}) is shared "
                     f"by {len(uids)} sessions: [{uid_list}]"
                 ),
-                timestamp=now,
+                timestamp=alert_time,
             ))
 
     # Sort: critical first, then warning, then info
