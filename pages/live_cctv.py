@@ -256,6 +256,7 @@ def detect_anomalies(
     """
     now = datetime.datetime.now()
     alerts: list[Alert] = []
+    active_statuses = {"in_progress", "submitted"}
 
     # Track IPs used by in-progress sessions for duplicate detection
     ip_usage: dict[str, list[str]] = {}
@@ -265,7 +266,7 @@ def detect_anomalies(
 
     for ev in events:
         # Rule 1: UID not on roster but has an active session in the lab
-        if ev.uid not in roster_set and ev.status == "in_progress":
+        if ev.uid not in roster_set and ev.status in active_statuses:
             alerts.append(Alert(
                 severity="critical",
                 message=(
@@ -278,7 +279,7 @@ def detect_anomalies(
         # Rule 2: Roster student logged in from outside the lab network
         if (
             ev.uid in roster_set
-            and ev.status == "in_progress"
+            and ev.status in active_statuses
             and ev.current_ip not in ip_seat_map
         ):
             alerts.append(Alert(
