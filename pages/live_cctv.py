@@ -119,6 +119,23 @@ def build_ip_to_seat_map(seats: list[Seat]) -> dict[str, Seat]:
     return {s.ip: s for s in seats}
 
 
+def _ip_in_cidrs(ip_str: str, cidrs: list[str]) -> bool:
+    """Return True if ip_str is contained in any configured CIDR block."""
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+
+    for cidr in cidrs:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            continue
+        if ip_obj in net:
+            return True
+    return False
+
+
 def _api_records_to_events(records: list[SessionRecord]) -> list[SessionEvent]:
     """Convert pl_api_client SessionRecord dicts into SessionEvent objects."""
     now = datetime.datetime.now()
@@ -280,13 +297,14 @@ def detect_anomalies(
         if (
             ev.uid in roster_set
             and ev.status in active_statuses
-            and ev.current_ip not in ip_seat_map
+            and not _ip_in_cidrs(ev.current_ip, LAB_CIDRS)
         ):
             alerts.append(Alert(
                 severity="critical",
                 message=(
                     f"OFF-SITE LOGIN: Student [{ev.uid}] is taking the "
-                    f"exam from a non-lab IP ({ev.current_ip})"
+                    f"exam from an IP outside the configured lab CIDRs "
+                    f"({ev.current_ip})"
                 ),
                 timestamp=now,
             ))
