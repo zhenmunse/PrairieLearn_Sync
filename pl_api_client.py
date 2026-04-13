@@ -22,8 +22,10 @@ every 15 seconds.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, TypedDict
 
 import requests
@@ -266,12 +268,19 @@ def _extract_latest_ip(events: list[dict[str, Any]]) -> tuple[str | None, str | 
         # PrairieLearn may place IP on either top-level keys or under
         # client_fingerprint.ip_address.
         client_fp = ev.get("client_fingerprint")
+        if isinstance(client_fp, str) and client_fp.strip().startswith("{"):
+            try:
+                client_fp = json.loads(client_fp)
+            except ValueError:
+                client_fp = None
         ip = (
             ev.get("ip")
             or ev.get("ip_address")
             or ev.get("client_ip")
             or (client_fp.get("ip_address") if isinstance(client_fp, dict) else None)
             or (client_fp.get("client_ip") if isinstance(client_fp, dict) else None)
+            or (client_fp.get("ip") if isinstance(client_fp, dict) else None)
+            or (client_fp.get("ipAddress") if isinstance(client_fp, dict) else None)
         )
         date_str = (
             ev.get("date")
@@ -354,27 +363,35 @@ def fetch_live_exam_status(
         r for r in records if r["status"] in ("in_progress", "submitted")
     ]
 
-    # Concurrency guard: sequential requests to avoid hammering the API.
-    # For large exams (>50 in-progress) we truncate to avoid timeouts.
-    MAX_LOG_FETCHES = 80
+    # Prioritize active sessions first so live proctoring remains responsive.
+    started_records.sort(
+        key=lambda r: 0 if r["status"] == "in_progress" else 1
+    )
+
+    # Fetch logs concurrently. This removes the previous hard cap that could
+    # drop IPs for tail records in larger cohorts.
+    max_workers = min(16, max(4, len(started_records)))
     ip_map: dict[str, tuple[str | None, str | None]] = {}
 
-    for rec in started_records[:MAX_LOG_FETCHES]:
-        iid = rec["instance_id"]
+    def _fetch_one(rec: dict[str, Any]) -> tuple[str, str | None, str | None]:
+        iid = rec.get("instance_id")
+        uid = str(rec.get("uid", "unknown"))
         if iid is None:
-            continue
+            return uid, None, None
         events = _fetch_instance_events(
             session, base_url, course_instance_id, str(iid),
         )
         ip, last_active = _extract_latest_ip(events)
-        ip_map[rec["uid"]] = (ip, last_active)
+        return uid, ip, last_active
 
-    if len(started_records) > MAX_LOG_FETCHES:
-        logger.warning(
-            "Skipped log fetches for %d started instances (limit: %d)",
-            len(started_records) - MAX_LOG_FETCHES,
-            MAX_LOG_FETCHES,
-        )
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_fetch_one, rec) for rec in started_records]
+        for fut in as_completed(futures):
+            try:
+                uid, ip, last_active = fut.result()
+                ip_map[uid] = (ip, last_active)
+            except Exception as exc:
+                logger.warning("Failed to fetch one assessment-instance log: %s", exc)
 
     # Step 3: Assemble final output
     output: list[SessionRecord] = []
