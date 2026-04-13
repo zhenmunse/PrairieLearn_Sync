@@ -250,22 +250,46 @@ def _extract_latest_ip(events: list[dict[str, Any]]) -> tuple[str | None, str | 
     if not events:
         return None, None
 
-    # Sort descending by date to guarantee we pick the latest entry
+    # Sort descending by timestamp to guarantee we pick the latest entry
     sorted_events = sorted(
         events,
-        key=lambda e: e.get("date", ""),
+        key=lambda e: (
+            e.get("date")
+            or e.get("event_date")
+            or e.get("date_iso8601")
+            or ""
+        ),
         reverse=True,
     )
 
     for ev in sorted_events:
-        ip = ev.get("ip") or ev.get("ip_address") or ev.get("client_ip")
-        date_str = ev.get("date", "")
+        # PrairieLearn may place IP on either top-level keys or under
+        # client_fingerprint.ip_address.
+        client_fp = ev.get("client_fingerprint")
+        ip = (
+            ev.get("ip")
+            or ev.get("ip_address")
+            or ev.get("client_ip")
+            or (client_fp.get("ip_address") if isinstance(client_fp, dict) else None)
+            or (client_fp.get("client_ip") if isinstance(client_fp, dict) else None)
+        )
+        date_str = (
+            ev.get("date")
+            or ev.get("event_date")
+            or ev.get("date_iso8601")
+            or ""
+        )
         if ip:
             last_active = _format_time(date_str)
             return ip, last_active
 
     # Fallback: return the timestamp of the newest event without an IP
-    date_str = sorted_events[0].get("date", "")
+    date_str = (
+        sorted_events[0].get("date")
+        or sorted_events[0].get("event_date")
+        or sorted_events[0].get("date_iso8601")
+        or ""
+    )
     return None, _format_time(date_str)
 
 
@@ -344,15 +368,18 @@ def fetch_live_exam_status(
             "instance_id": instance_id,
         })
 
-    # Step 2: Fetch IPs only for in-progress sessions (limit API load)
-    in_progress_records = [r for r in records if r["status"] == "in_progress"]
+    # Step 2: Fetch IPs for all started sessions (in-progress + submitted).
+    # This keeps CCTV/export useful even after students submit.
+    started_records = [
+        r for r in records if r["status"] in ("in_progress", "submitted")
+    ]
 
     # Concurrency guard: sequential requests to avoid hammering the API.
     # For large exams (>50 in-progress) we truncate to avoid timeouts.
     MAX_LOG_FETCHES = 80
     ip_map: dict[str, tuple[str | None, str | None]] = {}
 
-    for rec in in_progress_records[:MAX_LOG_FETCHES]:
+    for rec in started_records[:MAX_LOG_FETCHES]:
         iid = rec["instance_id"]
         if iid is None:
             continue
@@ -362,10 +389,10 @@ def fetch_live_exam_status(
         ip, last_active = _extract_latest_ip(events)
         ip_map[rec["uid"]] = (ip, last_active)
 
-    if len(in_progress_records) > MAX_LOG_FETCHES:
+    if len(started_records) > MAX_LOG_FETCHES:
         logger.warning(
-            "Skipped log fetches for %d in-progress instances (limit: %d)",
-            len(in_progress_records) - MAX_LOG_FETCHES,
+            "Skipped log fetches for %d started instances (limit: %d)",
+            len(started_records) - MAX_LOG_FETCHES,
             MAX_LOG_FETCHES,
         )
 
