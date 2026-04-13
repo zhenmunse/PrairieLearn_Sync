@@ -236,7 +236,18 @@ def _fetch_instance_events(
 def _determine_status(instance: dict[str, Any]) -> str:
     """Map a PL assessment-instance record to a dashboard status string."""
     is_open = instance.get("open", False)
+    time_remaining = str(instance.get("time_remaining") or "").strip().lower()
     score = instance.get("score_perc") or instance.get("points")
+
+    # PrairieLearn "Expired" sessions can remain open until the student
+    # reconnects, but they should not be treated as actively in-progress.
+    if is_open and (
+        "expired" in time_remaining
+        or time_remaining in {"0", "0 min", "0 mins", "0 minute", "0 minutes"}
+        or time_remaining.startswith("0 ")
+    ):
+        return "expired"
+
     if is_open:
         return "in_progress"
     if score is not None:
@@ -357,10 +368,12 @@ def fetch_live_exam_status(
             "instance_id": instance_id,
         })
 
-    # Step 2: Fetch IPs for all started sessions (in-progress + submitted).
+    # Step 2: Fetch IPs for all started sessions (in-progress/submitted/expired).
     # This keeps CCTV/export useful even after students submit.
     started_records = [
-        r for r in records if r["status"] in ("in_progress", "submitted")
+        r
+        for r in records
+        if r["status"] in ("in_progress", "submitted", "expired")
     ]
 
     # Prioritize active sessions first so live proctoring remains responsive.
