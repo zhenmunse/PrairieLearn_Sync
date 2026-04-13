@@ -25,6 +25,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytz
 import streamlit as st
 import streamlit.components.v1 as st_html
 
@@ -68,6 +69,19 @@ GRID_COLS: int = 10
 
 # Row labels: A, B, C, ...
 _ROW_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+# Ordered list of (display_label, tz_name) tuples for the timezone selector.
+# Default uses California time (auto DST: PST/PDT).
+COMMON_TIMEZONES: list[tuple[str, str]] = [
+    ("America/Los_Angeles  - Pacific (PST / PDT)",   "America/Los_Angeles"),
+    ("America/Denver       - Mountain (MST / MDT)",  "America/Denver"),
+    ("America/Chicago      - Central (CST / CDT)",   "America/Chicago"),
+    ("America/New_York     - Eastern (EST / EDT)",   "America/New_York"),
+    ("America/Phoenix      - Arizona (MST, no DST)", "America/Phoenix"),
+    ("America/Anchorage    - Alaska (AKST / AKDT)",  "America/Anchorage"),
+    ("Pacific/Honolulu     - Hawaii (HST)",          "Pacific/Honolulu"),
+    ("UTC",                                           "UTC"),
+]
 
 
 # ============================================================================
@@ -142,26 +156,71 @@ def _ip_in_cidrs(ip_str: str, cidrs: list[str]) -> bool:
     return False
 
 
+def get_tz_label(tz_name: str, date: datetime.date) -> str:
+    """
+    Return a human-readable UTC offset label for a given timezone on a
+    specific date, e.g. 'PDT (UTC-07:00)'.
+    """
+    tz = pytz.timezone(tz_name)
+    ref = tz.localize(datetime.datetime.combine(date, datetime.time(12, 0)))
+    abbrev = ref.strftime("%Z")
+    raw_offset = ref.strftime("%z")
+    offset_fmt = f"{raw_offset[:3]}:{raw_offset[3:]}"
+    return f"{abbrev} (UTC{offset_fmt})"
+
+
+def _parse_api_timestamp_to_utc(ts: str | None) -> datetime.datetime | None:
+    """Parse PL timestamp text into a timezone-aware UTC datetime."""
+    if not ts:
+        return None
+
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            dt = datetime.datetime.strptime(ts, fmt)
+            return dt.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+
+    try:
+        dt2 = datetime.datetime.fromisoformat(ts)
+        if dt2.tzinfo is None:
+            return dt2.replace(tzinfo=datetime.timezone.utc)
+        return dt2.astimezone(datetime.timezone.utc)
+    except ValueError:
+        pass
+
+    try:
+        from dateutil import parser as dateutil_parser
+        dt3 = dateutil_parser.isoparse(ts)
+        if dt3.tzinfo is None:
+            return dt3.replace(tzinfo=datetime.timezone.utc)
+        return dt3.astimezone(datetime.timezone.utc)
+    except Exception:
+        return None
+
+
+def _fmt_time_for_tz(dt: datetime.datetime | None, tz_name: str) -> str:
+    """Format a datetime as HH:MM:SS in the selected timezone."""
+    if dt is None:
+        return "--:--:--"
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+
+    tz = pytz.timezone(tz_name)
+    return dt.astimezone(tz).strftime("%H:%M:%S")
+
+
 def _api_records_to_events(records: list[SessionRecord]) -> list[SessionEvent]:
     """Convert pl_api_client SessionRecord dicts into SessionEvent objects."""
-    now = datetime.datetime.now()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     events: list[SessionEvent] = []
     for rec in records:
         ip = rec.get("ip") or "0.0.0.0"
         status = rec.get("status", "not_started")
         uid = rec.get("uid", "unknown")
-        last_active_str = rec.get("last_active_time")
-
-        if last_active_str:
-            try:
-                t = datetime.datetime.strptime(last_active_str, "%H:%M:%S")
-                last_active = now.replace(
-                    hour=t.hour, minute=t.minute, second=t.second, microsecond=0,
-                )
-            except ValueError:
-                last_active = now
-        else:
-            last_active = now
+        last_active_raw = rec.get("last_active_time")
+        last_active = _parse_api_timestamp_to_utc(last_active_raw) or now_utc
 
         if status == "not_started":
             continue
@@ -215,7 +274,7 @@ def generate_mock_events(
       - 1 UID-not-on-roster anomaly
     """
     rng = random.Random(seed)
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc)
     events: list[SessionEvent] = []
 
     # Shuffle seats for random assignment
@@ -277,7 +336,7 @@ def detect_anomalies(
     Scan the live event stream and return a list of alerts ordered by
     severity (critical first).
     """
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc)
     alerts: list[Alert] = []
     active_statuses = {"in_progress", "submitted"}
 
@@ -349,6 +408,7 @@ def resolve_seat_states(
     seats: list[Seat],
     events: list[SessionEvent],
     roster_set: set[str],
+    tz_name: str,
 ) -> dict[str, dict[str, Any]]:
     """
     For every physical seat, determine its display state and the occupant info.
@@ -417,7 +477,7 @@ def resolve_seat_states(
         else:
             state = _STATUS_NORMAL
 
-        active_str = ev.last_active.strftime("%H:%M:%S")
+        active_str = _fmt_time_for_tz(ev.last_active, tz_name)
         result[seat.label] = {
             "state": state,
             "uid": ev.uid,
@@ -595,14 +655,14 @@ def render_kpi_bar(
     c4.metric("Anomalies", anomaly_count, delta_color="inverse")
 
 
-def render_alert_feed(alerts: list[Alert]) -> None:
+def render_alert_feed(alerts: list[Alert], tz_name: str) -> None:
     """Render the right-hand audit / alert feed."""
     if not alerts:
         st.success("No anomalies detected. All sessions are clean.")
         return
 
     for alert in alerts:
-        ts = alert.timestamp.strftime("%H:%M:%S")
+        ts = _fmt_time_for_tz(alert.timestamp, tz_name)
         if alert.severity == "critical":
             st.error(f"**{ts}** -- {alert.message}")
         elif alert.severity == "warning":
@@ -611,7 +671,7 @@ def render_alert_feed(alerts: list[Alert]) -> None:
             st.info(f"**{ts}** -- {alert.message}")
 
 
-def render_event_log(events: list[SessionEvent]) -> None:
+def render_event_log(events: list[SessionEvent], tz_name: str) -> None:
     """Render the scrollable raw event log table."""
     rows = []
     for ev in sorted(events, key=lambda e: e.last_active, reverse=True):
@@ -619,7 +679,7 @@ def render_event_log(events: list[SessionEvent]) -> None:
             "UID": ev.uid,
             "IP": ev.current_ip,
             "Status": ev.status,
-            "Last Active": ev.last_active.strftime("%H:%M:%S"),
+            "Last Active": _fmt_time_for_tz(ev.last_active, tz_name),
         })
     st.dataframe(rows, width='stretch', hide_index=True, height=320)
 
@@ -663,6 +723,18 @@ def main() -> None:
         use_mock = data_source == "Mock"
         use_manual = data_source == "Manual"
         use_env = data_source == "Env / Secrets"
+
+        # -- Timezone controls --
+        tz_labels = [x[0] for x in COMMON_TIMEZONES]
+        tz_map = {label: name for label, name in COMMON_TIMEZONES}
+        selected_tz_label = st.selectbox(
+            "Display Timezone",
+            options=tz_labels,
+            index=0,
+            help="Controls Alert Feed and Event Log timestamps. DST is handled automatically.",
+        )
+        tz_name = tz_map[selected_tz_label]
+        st.caption(f"Current offset: {get_tz_label(tz_name, datetime.date.today())}")
 
         # -- Mock controls --
         if use_mock:
@@ -810,7 +882,7 @@ def main() -> None:
         else:
             events = []
             st.warning("No data returned from PrairieLearn API. Showing empty map.")
-    seat_states = resolve_seat_states(seats, events, roster_set)
+    seat_states = resolve_seat_states(seats, events, roster_set, tz_name)
     alerts = detect_anomalies(events, roster_set, ip_seat_map)
 
     # Audit-log alerts and event log for non-Mock modes
@@ -878,11 +950,11 @@ def main() -> None:
 
     with col_feed:
         st.subheader("Alert Feed")
-        render_alert_feed(alerts)
+        render_alert_feed(alerts, tz_name)
 
         st.divider()
         st.subheader("Event Log")
-        render_event_log(events)
+        render_event_log(events, tz_name)
 
     # ------------------------------------------------------------------
     # Auto-refresh via st.rerun (Streamlit 1.27+)
