@@ -100,7 +100,7 @@ class SessionEvent:
     """A single live-session record from PrairieLearn."""
     uid: str
     current_ip: str
-    status: str                     # not_started | in_progress | submitted
+    status: str                     # not_started | in_progress | submitted | expired
     last_active: datetime.datetime
 
 
