@@ -484,7 +484,7 @@ with st.sidebar:
     ) or ""
 
     connect_clicked = st.button(
-        "Connect", type="primary", use_container_width=True
+        "Connect", type="primary", width='stretch'
     )
 
     if connect_clicked:
@@ -553,7 +553,7 @@ with st.sidebar:
         repo = st.session_state.repo
         st.success(f"Connected: **{repo.full_name}**")
         st.caption(f"Default branch: `{repo.default_branch}`")
-        if st.button("Disconnect", use_container_width=True):
+        if st.button("Disconnect", width='stretch'):
             disconnect()
             st.rerun()
 
@@ -561,7 +561,7 @@ with st.sidebar:
 
     if st.button(
         "\U0001f5d1\ufe0f Clear All",
-        use_container_width=True,
+        width='stretch',
         help="Clear saved credentials (repo URL & PAT) and disconnect.",
     ):
         _clear_credentials()
@@ -1009,7 +1009,7 @@ for section in sections:
         with st.expander(expander_label):
             st.dataframe(
                 pd.DataFrame(grouped[section], columns=["Email / UID"]),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -1138,7 +1138,7 @@ if sdc_matched:
             [(m["name"], m["uid"], m["multiplier"]) for m in sdc_matched],
             columns=["Name", "Email / UID", "Multiplier"],
         )
-        st.dataframe(sdc_display, use_container_width=True, hide_index=True)
+        st.dataframe(sdc_display, width='stretch', hide_index=True)
 
     # Build sdc_groups list (one dict per multiplier group)
     sdc_groups = []
@@ -1199,7 +1199,7 @@ with st.expander("Pull Request preview"):
 if st.button(
     "Generate and Create Pull Request",
     type="primary",
-    use_container_width=True,
+    width='stretch',
 ):
     allow_access = build_allow_access(
         sections, grouped, slot_configs, sdc_groups=sdc_groups,

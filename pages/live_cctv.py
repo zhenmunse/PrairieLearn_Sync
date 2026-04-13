@@ -596,7 +596,7 @@ def render_event_log(events: list[SessionEvent]) -> None:
             "Status": ev.status,
             "Last Active": ev.last_active.strftime("%H:%M:%S"),
         })
-    st.dataframe(rows, use_container_width=True, hide_index=True, height=320)
+    st.dataframe(rows, width='stretch', hide_index=True, height=320)
 
 
 # ============================================================================
