@@ -45,7 +45,7 @@ class SessionRecord(TypedDict):
     uid: str
     status: str                     # "not_started" | "in_progress" | "submitted"
     ip: str | None
-    last_active_time: str | None    # "HH:MM:SS" formatted string
+    last_active_time: str | None    # ISO-8601 string from PL event timestamps
 
 
 # ============================================================================
@@ -245,7 +245,7 @@ def _determine_status(instance: dict[str, Any]) -> str:
 def _extract_latest_ip(events: list[dict[str, Any]]) -> tuple[str | None, str | None]:
     """
     Walk the event log (newest-first or sorted by date) and return a
-    (ip_address, last_active_time_str) tuple.
+    (ip_address, last_active_iso_str) tuple.
     """
     if not events:
         return None, None
@@ -280,8 +280,7 @@ def _extract_latest_ip(events: list[dict[str, Any]]) -> tuple[str | None, str | 
             or ""
         )
         if ip:
-            last_active = _format_time(date_str)
-            return ip, last_active
+            return ip, (date_str or None)
 
     # Fallback: return the timestamp of the newest event without an IP
     date_str = (
@@ -290,26 +289,7 @@ def _extract_latest_ip(events: list[dict[str, Any]]) -> tuple[str | None, str | 
         or sorted_events[0].get("date_iso8601")
         or ""
     )
-    return None, _format_time(date_str)
-
-
-def _format_time(iso_str: str) -> str | None:
-    """Parse an ISO-8601 datetime string and return 'HH:MM:SS', or None."""
-    if not iso_str:
-        return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            dt = datetime.datetime.strptime(iso_str, fmt)
-            return dt.strftime("%H:%M:%S")
-        except ValueError:
-            continue
-    # Last resort: try dateutil if available
-    try:
-        from dateutil import parser as dateutil_parser
-        dt = dateutil_parser.isoparse(iso_str)
-        return dt.strftime("%H:%M:%S")
-    except Exception:
-        return None
+    return None, (date_str or None)
 
 
 # ============================================================================
