@@ -216,7 +216,10 @@ def _api_records_to_events(records: list[SessionRecord]) -> list[SessionEvent]:
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     events: list[SessionEvent] = []
     for rec in records:
-        ip = rec.get("ip") or "0.0.0.0"
+        raw_ip = str(rec.get("ip") or "").strip()
+        # Treat empty/placeholder IPs as unknown instead of 0.0.0.0 to avoid
+        # misleading off-site alerts.
+        ip = "" if raw_ip in ("", "0.0.0.0") else raw_ip
         status = rec.get("status", "not_started")
         uid = rec.get("uid", "unknown")
         last_active_raw = rec.get("last_active_time")
@@ -343,7 +346,7 @@ def detect_anomalies(
     # Track IPs used by in-progress sessions for duplicate detection
     ip_usage: dict[str, list[str]] = {}
     for ev in events:
-        if ev.status == "in_progress":
+        if ev.status == "in_progress" and ev.current_ip:
             ip_usage.setdefault(ev.current_ip, []).append(ev.uid)
 
     for ev in events:
@@ -362,6 +365,7 @@ def detect_anomalies(
         if (
             ev.uid in roster_set
             and ev.status in active_statuses
+            and ev.current_ip
             and not _ip_in_cidrs(ev.current_ip, LAB_CIDRS)
         ):
             alerts.append(Alert(
@@ -428,7 +432,8 @@ def resolve_seat_states(
     # Index events by IP (only in-progress or submitted — ignore not_started)
     ip_events: dict[str, list[SessionEvent]] = {}
     for ev in events:
-        if ev.status in ("in_progress", "submitted"):
+        # Once submitted, the student should no longer occupy a live seat.
+        if ev.status == "in_progress" and ev.current_ip:
             ip_events.setdefault(ev.current_ip, []).append(ev)
 
     result: dict[str, dict[str, Any]] = {}
@@ -677,7 +682,7 @@ def render_event_log(events: list[SessionEvent], tz_name: str) -> None:
     for ev in sorted(events, key=lambda e: e.last_active, reverse=True):
         rows.append({
             "UID": ev.uid,
-            "IP": ev.current_ip,
+            "IP": ev.current_ip or "Unknown",
             "Status": ev.status,
             "Last Active": _fmt_time_for_tz(ev.last_active, tz_name),
         })
