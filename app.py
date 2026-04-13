@@ -328,13 +328,18 @@ def build_allow_access(
     entries = []
     for section in sections:
         cfg = slot_configs[section]
+        # Compute timeLimitMin from the section's own start/end window
+        _start_dt = datetime.datetime.combine(cfg["date"], cfg["start"])
+        _end_dt = datetime.datetime.combine(cfg["date"], cfg["end"])
+        _section_limit = max(int((_end_dt - _start_dt).total_seconds() / 60), 1)
         entries.append(
             {
+                "comment": section,
                 "startDate": combine_datetime(cfg["date"], cfg["start"]),
                 "endDate": combine_datetime(cfg["date"], cfg["end"]),
                 "uids": sorted(grouped[section]),
                 "credit": 100,
-                "timeLimitMin": 50,
+                "timeLimitMin": _section_limit,
                 "showClosedAssessment": False,
                 "showClosedAssessmentScore": False,
             }
@@ -346,6 +351,7 @@ def build_allow_access(
             if not sg.get("uids"):
                 continue
             sdc_entry: dict = {
+                "comment": f"SDC Accommodations ({sg['multiplier']}x)",
                 "startDate": combine_datetime(sg["date"], sg["start"]),
                 "endDate": combine_datetime(
                     sg.get("end_date", sg["date"]), sg["end"]
@@ -357,6 +363,16 @@ def build_allow_access(
                 "showClosedAssessmentScore": False,
             }
             entries.append(sdc_entry)
+
+    # Global fallback: hide grades until instructor releases them
+    entries.append(
+        {
+            "comment": "So students can't see their grade until we set a designated time later",
+            "active": False,
+            "showClosedAssessment": False,
+            "showClosedAssessmentScore": False,
+        }
+    )
 
     return entries
 
@@ -468,7 +484,7 @@ with st.sidebar:
     ) or ""
 
     connect_clicked = st.button(
-        "Connect", type="primary", use_container_width=True
+        "Connect", type="primary", width='stretch'
     )
 
     if connect_clicked:
@@ -537,7 +553,7 @@ with st.sidebar:
         repo = st.session_state.repo
         st.success(f"Connected: **{repo.full_name}**")
         st.caption(f"Default branch: `{repo.default_branch}`")
-        if st.button("Disconnect", use_container_width=True):
+        if st.button("Disconnect", width='stretch'):
             disconnect()
             st.rerun()
 
@@ -545,7 +561,7 @@ with st.sidebar:
 
     if st.button(
         "\U0001f5d1\ufe0f Clear All",
-        use_container_width=True,
+        width='stretch',
         help="Clear saved credentials (repo URL & PAT) and disconnect.",
     ):
         _clear_credentials()
@@ -993,7 +1009,7 @@ for section in sections:
         with st.expander(expander_label):
             st.dataframe(
                 pd.DataFrame(grouped[section], columns=["Email / UID"]),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -1122,7 +1138,7 @@ if sdc_matched:
             [(m["name"], m["uid"], m["multiplier"]) for m in sdc_matched],
             columns=["Name", "Email / UID", "Multiplier"],
         )
-        st.dataframe(sdc_display, use_container_width=True, hide_index=True)
+        st.dataframe(sdc_display, width='stretch', hide_index=True)
 
     # Build sdc_groups list (one dict per multiplier group)
     sdc_groups = []
@@ -1183,7 +1199,7 @@ with st.expander("Pull Request preview"):
 if st.button(
     "Generate and Create Pull Request",
     type="primary",
-    use_container_width=True,
+    width='stretch',
 ):
     allow_access = build_allow_access(
         sections, grouped, slot_configs, sdc_groups=sdc_groups,
