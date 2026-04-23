@@ -10,6 +10,7 @@ Workflow:
   5. Commit the updated infoAssessment.json to a new branch and open a Pull Request.
 """
 
+import copy
 import datetime
 import json
 import re
@@ -93,6 +94,14 @@ _STATE_DEFAULTS: dict = {
     "terms_cache": [],      # cached list of term folder names
     "assessments_cache": {},  # {term_name: [assessment_names]}
     "_file_reset": 0,        # counter for resetting file uploaders
+    "hydrated_target_key": "",
+    "source_file_sha": "",
+    "base_json_snapshot": {},
+    "original_allow_access": [],
+    "passthrough_allow_access": [],
+    "original_editor_rules": [],
+    "editable_rules": [],
+    "next_rule_seq": 1,
 }
 
 for _k, _v in _STATE_DEFAULTS.items():
@@ -453,6 +462,414 @@ def build_pr_body(
     )
 
 
+def _parse_iso_datetime(value: str | None) -> tuple[datetime.date, datetime.time]:
+    """Parse an ISO datetime string into (date, time)."""
+    default_date = datetime.date.today()
+    default_time = datetime.time(10, 0)
+
+    text = str(value or "").strip()
+    if not text:
+        return default_date, default_time
+
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.datetime.strptime(text, fmt)
+            return dt.date(), dt.time().replace(microsecond=0)
+        except ValueError:
+            continue
+
+    try:
+        dt2 = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt2.date(), dt2.time().replace(tzinfo=None, microsecond=0)
+    except ValueError:
+        return default_date, default_time
+
+
+def _normalize_uids(raw_uids: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Clean and deduplicate UID values while preserving input order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_uids or []:
+        uid = str(raw).strip()
+        if not uid or uid.lower() == "nan":
+            continue
+        if uid not in seen:
+            seen.add(uid)
+            out.append(uid)
+    return out
+
+
+def _is_session_allow_access_rule(rule: dict) -> bool:
+    """Return True when an allowAccess entry represents a timed student session."""
+    return bool(
+        isinstance(rule, dict)
+        and rule.get("startDate")
+        and rule.get("endDate")
+        and isinstance(rule.get("uids"), list)
+    )
+
+
+def _allow_access_rule_to_editor_rule(
+    rule: dict,
+    *,
+    origin_id: str | None,
+    rule_id: str,
+) -> dict:
+    """Convert one allowAccess session rule into editable UI state."""
+    start_date, start_time = _parse_iso_datetime(rule.get("startDate"))
+    end_date, end_time = _parse_iso_datetime(rule.get("endDate"))
+
+    known_keys = {
+        "comment",
+        "credit",
+        "timeLimitMin",
+        "startDate",
+        "endDate",
+        "uids",
+        "password",
+        "showClosedAssessment",
+        "showClosedAssessmentScore",
+        "active",
+    }
+
+    duration_min = max(
+        int(
+            (
+                datetime.datetime.combine(end_date, end_time)
+                - datetime.datetime.combine(start_date, start_time)
+            ).total_seconds()
+            / 60
+        ),
+        1,
+    )
+    try:
+        time_limit = int(rule.get("timeLimitMin", duration_min))
+    except (TypeError, ValueError):
+        time_limit = duration_min
+
+    try:
+        credit = int(rule.get("credit", 100))
+    except (TypeError, ValueError):
+        credit = 100
+
+    return {
+        "rule_id": rule_id,
+        "origin_id": origin_id,
+        "comment": str(rule.get("comment", "")).strip(),
+        "start_date": start_date,
+        "start_time": start_time,
+        "end_date": end_date,
+        "end_time": end_time,
+        "uids": _normalize_uids(rule.get("uids", [])),
+        "credit": credit,
+        "timeLimitMin": max(time_limit, 1),
+        "password": "" if rule.get("password") is None else str(rule.get("password")),
+        "showClosedAssessment": bool(rule.get("showClosedAssessment", False)),
+        "showClosedAssessmentScore": bool(rule.get("showClosedAssessmentScore", False)),
+        "active": bool(rule.get("active", True)),
+        "active_in_source": "active" in rule,
+        "extras": {k: copy.deepcopy(v) for k, v in rule.items() if k not in known_keys},
+    }
+
+
+def _editor_rule_to_allow_access_rule(rule: dict) -> dict:
+    """Convert editable UI state back into one allowAccess session rule."""
+    out = {
+        "comment": str(rule.get("comment", "")).strip(),
+        "credit": int(rule.get("credit", 100)),
+        "timeLimitMin": max(int(rule.get("timeLimitMin", 1)), 1),
+        "startDate": combine_datetime(rule["start_date"], rule["start_time"]),
+        "endDate": combine_datetime(rule["end_date"], rule["end_time"]),
+        "uids": _normalize_uids(rule.get("uids", [])),
+        "showClosedAssessment": bool(rule.get("showClosedAssessment", False)),
+        "showClosedAssessmentScore": bool(rule.get("showClosedAssessmentScore", False)),
+    }
+
+    if rule.get("password"):
+        out["password"] = str(rule["password"])
+
+    if rule.get("active_in_source") or not bool(rule.get("active", True)):
+        out["active"] = bool(rule.get("active", True))
+
+    for k, v in rule.get("extras", {}).items():
+        if k not in out:
+            out[k] = copy.deepcopy(v)
+
+    return out
+
+
+def _split_allow_access_rules(
+    allow_access: list[dict],
+    *,
+    rule_prefix: str,
+) -> tuple[list[dict], list[dict]]:
+    """Split allowAccess entries into editable session rules and passthrough rules."""
+    editable: list[dict] = []
+    passthrough: list[dict] = []
+
+    for idx, rule in enumerate(allow_access):
+        if _is_session_allow_access_rule(rule):
+            editable.append(
+                _allow_access_rule_to_editor_rule(
+                    rule,
+                    origin_id=f"orig-{idx}",
+                    rule_id=f"{rule_prefix}-orig-{idx}",
+                )
+            )
+        else:
+            passthrough.append(copy.deepcopy(rule))
+
+    return editable, passthrough
+
+
+def _build_empty_editor_rule(rule_id: str) -> dict:
+    """Create a blank editable session block."""
+    return {
+        "rule_id": rule_id,
+        "origin_id": None,
+        "comment": "",
+        "start_date": _DEFAULT_DATE,
+        "start_time": _TIME_VALUES[_DEFAULT_START_IDX],
+        "end_date": _DEFAULT_DATE,
+        "end_time": _TIME_VALUES[_DEFAULT_END_IDX],
+        "uids": [],
+        "credit": 100,
+        "timeLimitMin": 50,
+        "password": "",
+        "showClosedAssessment": False,
+        "showClosedAssessmentScore": False,
+        "active": True,
+        "active_in_source": False,
+        "extras": {},
+    }
+
+
+def _session_window_label(rule: dict) -> str:
+    """Render a stable [Start] - [End] label for one editable session rule."""
+    start = combine_datetime(rule["start_date"], rule["start_time"])
+    end = combine_datetime(rule["end_date"], rule["end_time"])
+    return f"[{start}] - [{end}]"
+
+
+def _uids_markdown(uids: list[str], max_items: int = 12) -> str:
+    """Format a UID list for concise markdown output."""
+    if not uids:
+        return "`(none)`"
+    clipped = uids[:max_items]
+    rendered = ", ".join(f"`{u}`" for u in clipped)
+    if len(uids) > max_items:
+        rendered += f", ... (+{len(uids) - max_items} more)"
+    return rendered
+
+
+def _password_state(value: str) -> str:
+    """Return a user-safe password state string for PR summaries."""
+    return "set" if str(value or "").strip() else "empty"
+
+
+def _calculate_access_diff(
+    original_rules: list[dict],
+    final_rules: list[dict],
+) -> dict[str, list[str]]:
+    """Compute Added / Modified / Deleted summary lines for editable rules."""
+    added: list[str] = []
+    modified: list[str] = []
+    deleted: list[str] = []
+
+    original_by_origin = {
+        r["origin_id"]: r for r in original_rules if r.get("origin_id")
+    }
+    final_by_origin = {
+        r["origin_id"]: r for r in final_rules if r.get("origin_id")
+    }
+
+    # New sessions
+    for rule in final_rules:
+        if rule.get("origin_id"):
+            continue
+        added.append(
+            f"- Session {_session_window_label(rule)}: Added UIDs: "
+            f"{_uids_markdown(rule['uids'])}"
+        )
+
+    for origin_id, old_rule in original_by_origin.items():
+        new_rule = final_by_origin.get(origin_id)
+        if new_rule is None:
+            deleted.append(
+                f"- Removed Session {_session_window_label(old_rule)} "
+                f"with UIDs: {_uids_markdown(old_rule['uids'])}"
+            )
+            continue
+
+        old_uids = set(old_rule["uids"])
+        new_uids = set(new_rule["uids"])
+
+        added_uids = sorted(new_uids - old_uids)
+        removed_uids = sorted(old_uids - new_uids)
+
+        if added_uids:
+            added.append(
+                f"- Session {_session_window_label(new_rule)}: Added UIDs: "
+                f"{_uids_markdown(added_uids)}"
+            )
+
+        if removed_uids:
+            deleted.append(
+                f"- Removed UIDs: {_uids_markdown(removed_uids)} "
+                f"from Session {_session_window_label(new_rule)}."
+            )
+
+        mods: list[str] = []
+        if (
+            old_rule["start_date"] != new_rule["start_date"]
+            or old_rule["start_time"] != new_rule["start_time"]
+            or old_rule["end_date"] != new_rule["end_date"]
+            or old_rule["end_time"] != new_rule["end_time"]
+        ):
+            old_start = combine_datetime(old_rule["start_date"], old_rule["start_time"])
+            old_end = combine_datetime(old_rule["end_date"], old_rule["end_time"])
+            new_start = combine_datetime(new_rule["start_date"], new_rule["start_time"])
+            new_end = combine_datetime(new_rule["end_date"], new_rule["end_time"])
+            mods.append(
+                f"window changed from [{old_start}] - [{old_end}] "
+                f"to [{new_start}] - [{new_end}]"
+            )
+
+        if int(old_rule["timeLimitMin"]) != int(new_rule["timeLimitMin"]):
+            mods.append(
+                f"time limit changed from {old_rule['timeLimitMin']} "
+                f"to {new_rule['timeLimitMin']}"
+            )
+
+        if _password_state(old_rule.get("password", "")) != _password_state(new_rule.get("password", "")):
+            mods.append(
+                f"password state changed from {_password_state(old_rule.get('password', ''))} "
+                f"to {_password_state(new_rule.get('password', ''))}"
+            )
+
+        if mods:
+            modified.append(
+                f"- Session {_session_window_label(new_rule)}: " + "; ".join(mods) + "."
+            )
+
+    return {"added": added, "modified": modified, "deleted": deleted}
+
+
+def _render_schedule_table(final_allow_access: list[dict], tz_name: str) -> str:
+    """Render markdown table for full post-update allowAccess schedule."""
+    session_entries = [r for r in final_allow_access if _is_session_allow_access_rule(r)]
+    session_entries = sorted(
+        session_entries,
+        key=lambda r: (str(r.get("startDate", "")), str(r.get("comment", ""))),
+    )
+
+    rows: list[str] = []
+    for rule in session_entries:
+        start = str(rule.get("startDate", ""))
+        end = str(rule.get("endDate", ""))
+        date_for_tz, _ = _parse_iso_datetime(start)
+        tz_label = get_tz_label(tz_name, date_for_tz)
+        rows.append(
+            f"| {rule.get('comment', '') or '(no comment)'} "
+            f"| {len(rule.get('uids', []))} "
+            f"| {start} "
+            f"| {end} "
+            f"| {rule.get('timeLimitMin', '')} "
+            f"| {('set' if rule.get('password') else 'empty')} "
+            f"| {tz_label} |"
+        )
+
+    if not rows:
+        rows.append("| (none) | 0 | - | - | - | - | - |")
+
+    return "\n".join(
+        [
+            "| Session | Students | Start | End | Time Limit | Password | Offset |",
+            "|---------|----------|-------|-----|------------|----------|--------|",
+        ]
+        + rows
+    )
+
+
+def build_pr_body_with_diff(
+    assessment_id: str,
+    diff_summary: dict[str, list[str]],
+    final_allow_access: list[dict],
+    tz_name: str,
+) -> str:
+    """Build final PR body with required changelog section at the top."""
+    added_lines = diff_summary.get("added") or ["- None."]
+    modified_lines = diff_summary.get("modified") or ["- None."]
+    deleted_lines = diff_summary.get("deleted") or ["- None."]
+
+    table_md = _render_schedule_table(final_allow_access, tz_name)
+
+    return "\n".join(
+        [
+            "## Access Rules Update Summary",
+            "**Added:**",
+            *added_lines,
+            "**Modified:**",
+            *modified_lines,
+            "**Deleted:**",
+            *deleted_lines,
+            "",
+            "---",
+            "*Below is the complete new schedule generated by the system:*",
+            "",
+            table_md,
+            "",
+            f"Assessment: `{assessment_id}`",
+            f"Timezone for display: `{tz_name}`",
+            "",
+            "Times are written to JSON as local wall-clock time (no UTC suffix).",
+        ]
+    )
+
+
+def _merge_imported_rules(
+    existing_rules: list[dict],
+    imported_session_rules: list[dict],
+    *,
+    merge_mode: str,
+    rule_prefix: str,
+    next_rule_seq: int,
+) -> tuple[list[dict], int]:
+    """Apply append/merge behavior for imported CSV/manual generated sessions."""
+    merged_rules = copy.deepcopy(existing_rules)
+
+    for raw in imported_session_rules:
+        imported = _allow_access_rule_to_editor_rule(
+            raw,
+            origin_id=None,
+            rule_id=f"{rule_prefix}-new-{next_rule_seq}",
+        )
+        next_rule_seq += 1
+
+        if merge_mode == "Merge by Session Window":
+            found_idx = None
+            for idx, rule in enumerate(merged_rules):
+                if (
+                    rule["comment"] == imported["comment"]
+                    and rule["start_date"] == imported["start_date"]
+                    and rule["start_time"] == imported["start_time"]
+                    and rule["end_date"] == imported["end_date"]
+                    and rule["end_time"] == imported["end_time"]
+                ):
+                    found_idx = idx
+                    break
+
+            if found_idx is not None:
+                existing_uids = set(merged_rules[found_idx]["uids"])
+                existing_uids.update(imported["uids"])
+                merged_rules[found_idx]["uids"] = sorted(existing_uids)
+                continue
+
+        merged_rules.append(imported)
+
+    return merged_rules, next_rule_seq
+
+
 def disconnect():
     """Reset all GitHub-related session state."""
     for key, default in _STATE_DEFAULTS.items():
@@ -606,8 +1023,26 @@ with _reset_col:
         st.session_state.terms_cache = []
         st.session_state.assessments_cache = {}
         st.session_state["_file_reset"] = st.session_state.get("_file_reset", 0) + 1
+        st.session_state.hydrated_target_key = ""
+        st.session_state.source_file_sha = ""
+        st.session_state.base_json_snapshot = {}
+        st.session_state.original_allow_access = []
+        st.session_state.passthrough_allow_access = []
+        st.session_state.original_editor_rules = []
+        st.session_state.editable_rules = []
+        st.session_state.next_rule_seq = 1
         for _k in list(st.session_state.keys()):
-            if isinstance(_k, str) and _k.startswith(("date_", "start_", "end_", "sdc_")):
+            if isinstance(_k, str) and _k.startswith(
+                (
+                    "date_",
+                    "start_",
+                    "end_",
+                    "sdc_",
+                    "edit_",
+                    "append_",
+                    "import_",
+                )
+            ):
                 del st.session_state[_k]
         st.rerun()
 
@@ -700,523 +1135,17 @@ st.caption(f"Target file: `{json_path}`")
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Step 3 — Roster Input (CSV upload or manual email list)
+# Step 3 — Read & Hydrate Existing allowAccess
 # ---------------------------------------------------------------------------
 
-st.header("Step 3 — Upload Canvas Roster and Assign Time Slots")
+target_key = f"{repo.full_name}:{repo.default_branch}:{json_path}"
+rule_prefix = f"{selected_term}-{selected_assessment}".replace("/", "-")
 
-roster_mode = st.radio(
-    "Roster input method",
-    options=["CSV Upload", "Manual Entry"],
-    horizontal=True,
-    help=(
-        "CSV Upload: import students grouped by section from a Canvas export.  "
-        "Manual Entry: paste a list of email addresses with a single shared time slot."
-    ),
-)
-
-grouped: dict
-sections: list
-sdc_matched: list[dict] = []    # populated by SDC multiplier CSV upload
-sdc_unmatched: list[str] = []   # SDC names not found in roster
-df_raw: pd.DataFrame = pd.DataFrame()  # retain full roster for SDC cross-ref
-
-if roster_mode == "CSV Upload":
-    _fr = st.session_state.get("_file_reset", 0)
-    csv_file = st.file_uploader(
-        "Canvas Roster CSV",
-        type=["csv"],
-        key=f"csv_upload_{_fr}",
-        help="Export from Canvas > Grades > Export (.csv).",
-    )
-
-    if csv_file is None:
-        st.info("Upload a Canvas Roster CSV to continue.")
-        st.stop()
-
-    audit(
-        "file_upload",
-        detail=f"Canvas Roster CSV: {csv_file.name}",
-        meta={"file_name": csv_file.name, "size_bytes": csv_file.size},
-    )
-
-    try:
-        df_raw = load_csv_dataframe(csv_file)
-    except ValueError as exc:
-        st.error(f"CSV Error: {exc}")
-        st.stop()
-
-    if df_raw.empty:
-        st.error("The uploaded CSV contains no rows.")
-        st.stop()
-
-    csv_columns = df_raw.columns.tolist()
-
-    col_sec, col_email, col_name = st.columns(3)
-
-    with col_sec:
-        section_col_guess = next(
-            (c for c in csv_columns if "section" in c.lower()), csv_columns[0]
-        )
-        section_col = st.selectbox(
-            "Section column",
-            options=csv_columns,
-            index=csv_columns.index(section_col_guess),
-            help="The column that identifies which section a student belongs to.",
-        )
-
-    with col_email:
-        email_col_guess = next(
-            (
-                c
-                for c in csv_columns
-                if "email" in c.lower()
-                or "sis login" in c.lower()
-                or "login id" in c.lower()
-            ),
-            csv_columns[0],
-        )
-        email_col = st.selectbox(
-            "Email / UID column",
-            options=csv_columns,
-            index=csv_columns.index(email_col_guess),
-            help="The column that contains the student email or SIS Login ID.",
-        )
-
-    with col_name:
-        name_col_guess = next(
-            (c for c in csv_columns if "name" in c.lower() and "section" not in c.lower()),
-            csv_columns[0],
-        )
-        name_col = st.selectbox(
-            "Student name column",
-            options=csv_columns,
-            index=csv_columns.index(name_col_guess),
-            help="Used for SDC multiplier cross-referencing by name.",
-        )
-
-    if section_col == email_col:
-        st.warning("Section column and Email column must be different.")
-        st.stop()
-
-    # Parse and group students
-    df = df_raw[[section_col, email_col]].copy()
-    df[email_col] = df[email_col].astype(str).str.strip()
-    df = df[df[email_col].notna() & (df[email_col] != "") & (df[email_col] != "nan")]
-    grouped = df.groupby(section_col)[email_col].apply(list).to_dict()
-
-    # Merge ", SDC" sub-sections into their parent section
-    grouped = merge_sdc_sections(grouped)
-    sections = sorted(grouped.keys())
-
-    if not sections:
-        st.error(
-            "No sections were found after parsing the CSV. "
-            "Check the column mapping."
-        )
-        st.stop()
-
-    st.success(
-        f"Found **{len(sections)} section(s)** across **{len(df)} student(s)**."
-    )
-
-    # ---- SDC Multiplier CSV upload ----
-    st.divider()
-    st.subheader("SDC / Accommodations (Optional)")
-    st.caption(
-        "Upload an SDC multiplier CSV to pull accommodated students out of "
-        "their regular sections and assign extended time. The CSV should have "
-        "columns for student name and time multiplier."
-    )
-
-    sdc_csv = st.file_uploader(
-        "SDC Multiplier CSV",
-        type=["csv"],
-        key=f"sdc_csv_uploader_{_fr}",
-        help="Two columns: Student name + Time multiplier (e.g. 1.5, 2).",
-    )
-
-    if sdc_csv is not None:
-        audit(
-            "file_upload",
-            detail=f"SDC Multiplier CSV: {sdc_csv.name}",
-            meta={"file_name": sdc_csv.name, "size_bytes": sdc_csv.size},
-        )
+if st.session_state.hydrated_target_key != target_key:
+    with st.spinner(f"Loading `{json_path}` from `{repo.default_branch}`..."):
         try:
-            sdc_df = load_csv_dataframe(sdc_csv)
-        except ValueError as exc:
-            st.error(f"SDC CSV Error: {exc}")
-            sdc_df = pd.DataFrame()
-
-        if not sdc_df.empty:
-            sdc_columns = sdc_df.columns.tolist()
-            sdc_col1, sdc_col2 = st.columns(2)
-            with sdc_col1:
-                sdc_name_guess = next(
-                    (c for c in sdc_columns if "student" in c.lower() or "name" in c.lower()),
-                    sdc_columns[0],
-                )
-                sdc_name_col = st.selectbox(
-                    "SDC name column",
-                    options=sdc_columns,
-                    index=sdc_columns.index(sdc_name_guess),
-                    key="sdc_name_col",
-                )
-            with sdc_col2:
-                sdc_mult_guess = next(
-                    (c for c in sdc_columns if "multi" in c.lower() or "time" in c.lower()),
-                    sdc_columns[-1],
-                )
-                sdc_mult_col = st.selectbox(
-                    "Multiplier column",
-                    options=sdc_columns,
-                    index=sdc_columns.index(sdc_mult_guess),
-                    key="sdc_mult_col",
-                )
-
-            # Cross-reference by name
-            sdc_matched, sdc_unmatched = match_sdc_to_roster(
-                sdc_df, df_raw,
-                sdc_name_col, sdc_mult_col,
-                name_col, email_col,
-            )
-
-            if sdc_matched:
-                sdc_uid_set = {m["uid"] for m in sdc_matched}
-                # Remove SDC UIDs from all regular sections
-                for sec in list(grouped.keys()):
-                    grouped[sec] = [u for u in grouped[sec] if u not in sdc_uid_set]
-                # Remove empty sections
-                grouped = {s: uids for s, uids in grouped.items() if uids}
-                sections = sorted(grouped.keys())
-
-                mult_summary = {}
-                for m in sdc_matched:
-                    mult_summary.setdefault(m["multiplier"], []).append(m["name"])
-                summary_parts = [
-                    f"{mult}x: {len(names)} student(s)"
-                    for mult, names in sorted(mult_summary.items())
-                ]
-                st.success(
-                    f"Matched **{len(sdc_matched)} SDC student(s)** "
-                    f"({', '.join(summary_parts)}). "
-                    "They have been removed from regular sections."
-                )
-
-            if sdc_unmatched:
-                st.warning(
-                    f"{len(sdc_unmatched)} SDC name(s) could not be matched "
-                    f"to the roster: {', '.join(sdc_unmatched)}"
-                )
-
-else:
-    # Manual Entry mode — no section concept, one shared time slot
-    raw_input = st.text_area(
-        "Student emails / UIDs",
-        height=200,
-        placeholder="student1@ucdavis.edu\nstudent2@ucdavis.edu\n...",
-        help="Enter one email address (or PrairieLearn UID) per line.",
-    )
-
-    emails: list[str] = [
-        line.strip()
-        for line in raw_input.splitlines()
-        if line.strip()
-    ]
-
-    if not emails:
-        st.info("Enter at least one student email to continue.")
-        st.stop()
-
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    unique_emails: list[str] = []
-    for e in emails:
-        if e not in seen:
-            seen.add(e)
-            unique_emails.append(e)
-
-    if len(unique_emails) < len(emails):
-        st.warning(
-            f"{len(emails) - len(unique_emails)} duplicate(s) removed. "
-            f"Using {len(unique_emails)} unique address(es)."
-        )
-
-    _MANUAL_SECTION = "Manual"
-    grouped = {_MANUAL_SECTION: unique_emails}
-    sections = [_MANUAL_SECTION]
-
-    st.success(f"**{len(unique_emails)} student(s)** will share one time slot.")
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# Step 4 — Per-section time slot configuration
-# ---------------------------------------------------------------------------
-
-st.subheader("Time Slot Assignment")
-
-# Timezone selector — must be declared before the section loop so that
-# each row can display the DST-resolved offset for its chosen date.
-_tz_labels = [label for label, _ in COMMON_TIMEZONES]
-_tz_names  = {label: name for label, name in COMMON_TIMEZONES}
-
-col_tz_sel, col_tz_info = st.columns([3, 3])
-with col_tz_sel:
-    selected_tz_label = st.selectbox(
-        "Timezone",
-        options=_tz_labels,
-        index=0,
-        help=(
-            "All times are entered in this timezone. "
-            "Daylight Saving Time is resolved automatically per date."
-        ),
-    )
-selected_tz_name = _tz_names[selected_tz_label]
-
-with col_tz_info:
-    _today_label = get_tz_label(selected_tz_name, datetime.date.today())
-    st.info(
-        f"Today's active offset: **{_today_label}**  \n"
-        "Times are written to JSON as local wall-clock time (no UTC suffix). "
-        "The DST column below reflects the offset on each section's exam date."
-    )
-
-st.caption(
-    "Configure the exam date and start/end times for each section. "
-    "Expand a section row to review the student list."
-)
-
-# Table header row
-hdr0, hdr1, hdr2, hdr3, hdr4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
-if roster_mode == "CSV Upload":
-    hdr0.markdown("**Section**")
-else:
-    hdr0.markdown("**Students**")
-hdr1.markdown("**Date**")
-hdr2.markdown("**Start**")
-hdr3.markdown("**End**")
-hdr4.markdown("**DST Offset**")
-st.divider()
-
-slot_configs: dict[str, dict] = {}
-
-for section in sections:
-    col0, col1, col2, col3, col4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
-
-    with col0:
-        student_count = len(grouped[section])
-        expander_label = (
-            f"{student_count} students"
-            if section == "Manual"
-            else f"{section}  ({student_count} students)"
-        )
-        with st.expander(expander_label):
-            st.dataframe(
-                pd.DataFrame(grouped[section], columns=["Email / UID"]),
-                width='stretch',
-                hide_index=True,
-            )
-
-    with col1:
-        _date_sel = st.selectbox(
-            "Date",
-            options=_DATE_LABELS,
-            index=_DEFAULT_DATE_IDX,
-            key=f"date_{section}",
-            label_visibility="collapsed",
-        )
-        chosen_date = _DATE_VALUES[_DATE_LABELS.index(_date_sel)]
-
-    with col2:
-        _start_sel = st.selectbox(
-            "Start",
-            options=_TIME_LABELS,
-            index=_DEFAULT_START_IDX,
-            key=f"start_{section}",
-            label_visibility="collapsed",
-        )
-        chosen_start = _TIME_VALUES[_TIME_LABELS.index(_start_sel)]
-
-    with col3:
-        _end_sel = st.selectbox(
-            "End",
-            options=_TIME_LABELS,
-            index=_DEFAULT_END_IDX,
-            key=f"end_{section}",
-            label_visibility="collapsed",
-        )
-        chosen_end = _TIME_VALUES[_TIME_LABELS.index(_end_sel)]
-
-    with col4:
-        # Resolve DST for this section's specific exam date
-        tz_label = get_tz_label(selected_tz_name, chosen_date)
-        st.markdown(f"<br><code>{tz_label}</code>", unsafe_allow_html=True)
-
-    slot_configs[section] = {
-        "date": chosen_date,
-        "start": chosen_start,
-        "end": chosen_end,
-    }
-
-# ---------------------------------------------------------------------------
-# SDC Configuration (only shown when SDC students matched from multiplier CSV)
-# ---------------------------------------------------------------------------
-
-sdc_groups: list[dict] | None = None
-
-if sdc_matched:
-    st.divider()
-    st.subheader("SDC / Accommodations — Global Window")
-
-    multiplier_groups = group_sdc_by_multiplier(sdc_matched)
-    total_sdc = sum(len(uids) for uids in multiplier_groups.values())
-    group_labels = ", ".join(
-        f"{m}x ({len(uids)})" for m, uids in sorted(multiplier_groups.items())
-    )
-    st.caption(
-        f"{total_sdc} SDC student(s) in {len(multiplier_groups)} group(s): "
-        f"{group_labels}."
-    )
-
-    # --- Derive timing parameters from section slot configs ---
-    _section_starts = [cfg["start"] for cfg in slot_configs.values()]
-    _section_ends = [cfg["end"] for cfg in slot_configs.values()]
-    earliest_start = min(_section_starts) if _section_starts else datetime.time(10, 0)
-    latest_start_default = max(_section_starts) if _section_starts else datetime.time(10, 0)
-
-    # Base exam duration (minutes) derived from regular section configs
-    _first_cfg = next(iter(slot_configs.values()), None)
-    if _first_cfg:
-        _dur_delta = (
-            datetime.datetime.combine(datetime.date.today(), _first_cfg["end"])
-            - datetime.datetime.combine(datetime.date.today(), _first_cfg["start"])
-        )
-        base_exam_min = max(int(_dur_delta.total_seconds() / 60), 1)
-    else:
-        base_exam_min = SDC_BASE_EXAM_MIN
-
-    sdc_col1, sdc_col2 = st.columns(2)
-    with sdc_col1:
-        sdc_date = st.date_input(
-            "SDC exam date",
-            value=_DEFAULT_DATE,
-            key="sdc_date",
-        )
-        st.markdown(
-            f"**Window opens:** `{earliest_start.strftime('%H:%M')}`  \n"
-            f"*(earliest section start — auto-detected)*"
-        )
-    with sdc_col2:
-        last_exam_start = st.time_input(
-            "Last exam start time",
-            value=latest_start_default,
-            key="sdc_last_exam_start",
-            step=300,
-            help="The start time of the last regular exam session of the day.",
-        )
-
-    # DST offset for SDC date
-    sdc_tz_label = get_tz_label(selected_tz_name, sdc_date)
-    st.caption(
-        f"SDC date DST offset: `{sdc_tz_label}` "
-        f"| Base exam duration: **{base_exam_min} min**"
-    )
-
-    # Per-group summary with auto-computed end times
-    st.markdown("**Per-group schedule:**")
-    for mult in sorted(multiplier_groups.keys()):
-        uids = multiplier_groups[mult]
-        computed_min = int(base_exam_min * mult)
-        _end_dt = (
-            datetime.datetime.combine(sdc_date, last_exam_start)
-            + datetime.timedelta(minutes=computed_min)
-        )
-        st.write(
-            f"- **{mult}x** — {len(uids)} student(s), "
-            f"timeLimitMin = {computed_min} min, "
-            f"window closes `{_end_dt.strftime('%H:%M')}`"
-        )
-
-    with st.expander(f"SDC student list ({total_sdc} students)"):
-        sdc_display = pd.DataFrame(
-            [(m["name"], m["uid"], m["multiplier"]) for m in sdc_matched],
-            columns=["Name", "Email / UID", "Multiplier"],
-        )
-        st.dataframe(sdc_display, width='stretch', hide_index=True)
-
-    # Build sdc_groups list (one dict per multiplier group)
-    sdc_groups = []
-    for mult in sorted(multiplier_groups.keys()):
-        computed_min = int(base_exam_min * mult)
-        _end_dt = (
-            datetime.datetime.combine(sdc_date, last_exam_start)
-            + datetime.timedelta(minutes=computed_min)
-        )
-        sdc_groups.append({
-            "uids": multiplier_groups[mult],
-            "date": sdc_date,
-            "start": earliest_start,
-            "end": _end_dt.time(),
-            "end_date": _end_dt.date(),
-            "timeLimitMin": computed_min,
-            "multiplier": mult,
-        })
-
-st.divider()
-
-# ---------------------------------------------------------------------------
-# Step 5 — Validation and Pull Request submission
-# ---------------------------------------------------------------------------
-
-st.header("Step 4 — Review and Submit Pull Request")
-
-# Validate time ordering before any API calls
-time_errors = [
-    f"**{s}**: Start time must be earlier than End time."
-    for s, cfg in slot_configs.items()
-    if cfg["start"] >= cfg["end"]
-]
-if sdc_groups:
-    for _sg in sdc_groups:
-        _sg_start_dt = datetime.datetime.combine(_sg["date"], _sg["start"])
-        _sg_end_dt = datetime.datetime.combine(
-            _sg.get("end_date", _sg["date"]), _sg["end"]
-        )
-        if _sg_start_dt >= _sg_end_dt:
-            time_errors.append(
-                f"**SDC ({_sg['multiplier']}x)**: Window open must be earlier than close."
-            )
-            break
-if time_errors:
-    for err in time_errors:
-        st.error(err)
-    st.stop()
-
-# PR preview
-with st.expander("Pull Request preview"):
-    pr_body_preview = build_pr_body(
-        selected_assessment, sections, slot_configs, grouped,
-        selected_tz_name, sdc_groups=sdc_groups,
-    )
-    st.markdown(pr_body_preview)
-
-if st.button(
-    "Generate and Create Pull Request",
-    type="primary",
-    width='stretch',
-):
-    allow_access = build_allow_access(
-        sections, grouped, slot_configs, sdc_groups=sdc_groups,
-    )
-
-    # --- 1. Fetch remote infoAssessment.json ---
-    with st.spinner(f"Fetching `{json_path}` from GitHub..."):
-        try:
-            _fetched = repo.get_contents(json_path)
-            # get_contents returns a list for directories; for a file path it
-            # always returns a single ContentFile — unwrap defensively.
-            file_obj = _fetched[0] if isinstance(_fetched, list) else _fetched
+            fetched = repo.get_contents(json_path, ref=repo.default_branch)
+            file_obj = fetched[0] if isinstance(fetched, list) else fetched
         except UnknownObjectException:
             st.error(
                 f"`{json_path}` was not found in the repository. "
@@ -1225,35 +1154,488 @@ if st.button(
             st.stop()
         except GithubException as exc:
             st.error(
-                f"GitHub API error while fetching the target file: "
+                f"GitHub API error while fetching `{json_path}`: "
                 f"{exc.data.get('message', str(exc))}"
             )
             st.stop()
 
-    # --- 2. Parse remote JSON ---
     try:
         raw_text = file_obj.decoded_content.decode("utf-8")
-        base_json: dict = json.loads(raw_text)
+        base_json_snapshot: dict = json.loads(raw_text)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         st.error(
             f"The remote `{JSON_FILE_NAME}` could not be parsed as JSON: {exc}"
         )
         st.stop()
 
-    # --- 3. Overwrite allowAccess ---
-    base_json["allowAccess"] = allow_access
+    original_allow_access = base_json_snapshot.get("allowAccess", [])
+    if not isinstance(original_allow_access, list):
+        st.error("`allowAccess` is not a JSON array in the remote file.")
+        st.stop()
+
+    editable_rules, passthrough_rules = _split_allow_access_rules(
+        original_allow_access,
+        rule_prefix=rule_prefix,
+    )
+
+    st.session_state.hydrated_target_key = target_key
+    st.session_state.source_file_sha = file_obj.sha
+    st.session_state.base_json_snapshot = copy.deepcopy(base_json_snapshot)
+    st.session_state.original_allow_access = copy.deepcopy(original_allow_access)
+    st.session_state.passthrough_allow_access = copy.deepcopy(passthrough_rules)
+    st.session_state.original_editor_rules = copy.deepcopy(editable_rules)
+    st.session_state.editable_rules = copy.deepcopy(editable_rules)
+    st.session_state.next_rule_seq = max(1, len(editable_rules) + 1)
+
+st.header("Step 3 — Edit Existing Access Rules")
+st.caption(
+    "Loaded from the repository default branch. You can fully edit each session "
+    "(time window, UIDs, password, limits), delete blocks, or append new blocks."
+)
+
+summary_col1, summary_col2, summary_col3 = st.columns(3)
+summary_col1.metric("Editable Sessions", len(st.session_state.editable_rules))
+summary_col2.metric("Passthrough Rules", len(st.session_state.passthrough_allow_access))
+summary_col3.metric("Source Branch", repo.default_branch)
+
+reload_col, add_col = st.columns([1, 1])
+with reload_col:
+    if st.button("Reload Latest From Main", help="Discard local edits and re-hydrate from default branch."):
+        st.session_state.hydrated_target_key = ""
+        st.rerun()
+with add_col:
+    if st.button("Add Empty Session Block"):
+        new_id = f"{rule_prefix}-new-{st.session_state.next_rule_seq}"
+        st.session_state.next_rule_seq += 1
+        st.session_state.editable_rules.append(_build_empty_editor_rule(new_id))
+        st.rerun()
+
+_tz_labels = [label for label, _ in COMMON_TIMEZONES]
+_tz_names = {label: name for label, name in COMMON_TIMEZONES}
+selected_tz_label = st.selectbox(
+    "Timezone",
+    options=_tz_labels,
+    index=0,
+    key=f"edit_timezone_{rule_prefix}",
+    help=(
+        "Used for display and PR table offsets. Times are still written to JSON "
+        "as local wall-clock timestamps without UTC suffix."
+    ),
+)
+selected_tz_name = _tz_names[selected_tz_label]
+st.info(f"Today's active offset: **{get_tz_label(selected_tz_name, datetime.date.today())}**")
+
+updated_rules: list[dict] = []
+for idx, rule in enumerate(st.session_state.editable_rules, start=1):
+    rid = rule["rule_id"]
+    label = rule.get("comment") or f"Session {idx}"
+    with st.expander(f"{idx}. {label}", expanded=False):
+        delete_clicked = st.button("Delete This Session", key=f"edit_delete_{rid}")
+
+        c1, c2 = st.columns(2)
+        comment = c1.text_input(
+            "Comment",
+            value=rule.get("comment", ""),
+            key=f"edit_comment_{rid}",
+        ) or ""
+        password = c2.text_input(
+            "Password (optional)",
+            value=rule.get("password", ""),
+            key=f"edit_password_{rid}",
+        ) or ""
+
+        c3, c4, c5, c6 = st.columns(4)
+        start_date = c3.date_input(
+            "Start date",
+            value=rule["start_date"],
+            key=f"edit_start_date_{rid}",
+        )
+        start_time = c4.time_input(
+            "Start time",
+            value=rule["start_time"],
+            step=300,
+            key=f"edit_start_time_{rid}",
+        )
+        end_date = c5.date_input(
+            "End date",
+            value=rule["end_date"],
+            key=f"edit_end_date_{rid}",
+        )
+        end_time = c6.time_input(
+            "End time",
+            value=rule["end_time"],
+            step=300,
+            key=f"edit_end_time_{rid}",
+        )
+
+        c7, c8, c9 = st.columns(3)
+        credit = c7.number_input(
+            "Credit",
+            min_value=0,
+            max_value=100,
+            value=int(rule.get("credit", 100)),
+            step=1,
+            key=f"edit_credit_{rid}",
+        )
+        time_limit_min = c8.number_input(
+            "timeLimitMin",
+            min_value=1,
+            value=int(rule.get("timeLimitMin", 50)),
+            step=1,
+            key=f"edit_time_limit_{rid}",
+        )
+        active = c9.checkbox(
+            "Active",
+            value=bool(rule.get("active", True)),
+            key=f"edit_active_{rid}",
+        )
+
+        c10, c11 = st.columns(2)
+        show_closed = c10.checkbox(
+            "showClosedAssessment",
+            value=bool(rule.get("showClosedAssessment", False)),
+            key=f"edit_show_closed_{rid}",
+        )
+        show_closed_score = c11.checkbox(
+            "showClosedAssessmentScore",
+            value=bool(rule.get("showClosedAssessmentScore", False)),
+            key=f"edit_show_closed_score_{rid}",
+        )
+
+        uid_text = st.text_area(
+            "UIDs (one per line)",
+            value="\n".join(rule.get("uids", [])),
+            height=140,
+            key=f"edit_uids_{rid}",
+        )
+        parsed_uids = _normalize_uids(uid_text.splitlines())
+
+        tz_for_row = get_tz_label(selected_tz_name, start_date)
+        st.caption(f"Row offset: `{tz_for_row}` | UIDs: **{len(parsed_uids)}**")
+
+        if delete_clicked:
+            continue
+
+        updated_rules.append(
+            {
+                "rule_id": rid,
+                "origin_id": rule.get("origin_id"),
+                "comment": comment.strip(),
+                "start_date": start_date,
+                "start_time": start_time,
+                "end_date": end_date,
+                "end_time": end_time,
+                "uids": parsed_uids,
+                "credit": int(credit),
+                "timeLimitMin": int(time_limit_min),
+                "password": password,
+                "showClosedAssessment": bool(show_closed),
+                "showClosedAssessmentScore": bool(show_closed_score),
+                "active": bool(active),
+                "active_in_source": bool(rule.get("active_in_source", False)),
+                "extras": copy.deepcopy(rule.get("extras", {})),
+            }
+        )
+
+st.session_state.editable_rules = updated_rules
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Step 4 — Optional Append / Merge from CSV or Manual
+# ---------------------------------------------------------------------------
+
+st.header("Step 4 — Append or Merge New Sessions")
+st.caption(
+    "Use CSV Upload or Manual Entry to generate additional session blocks, "
+    "then append/merge them into the editable schedule above."
+)
+
+append_mode = st.radio(
+    "Input method",
+    options=["CSV Upload", "Manual Entry"],
+    horizontal=True,
+    key=f"append_mode_{rule_prefix}",
+)
+
+append_grouped: dict[str, list[str]] = {}
+append_sections: list[str] = []
+
+if append_mode == "CSV Upload":
+    csv_file = st.file_uploader(
+        "Canvas Roster CSV",
+        type=["csv"],
+        key=f"append_csv_{st.session_state.get('_file_reset', 0)}_{rule_prefix}",
+    )
+
+    if csv_file is not None:
+        audit(
+            "file_upload",
+            detail=f"Canvas Roster CSV: {csv_file.name}",
+            meta={"file_name": csv_file.name, "size_bytes": csv_file.size},
+        )
+        try:
+            df_raw = load_csv_dataframe(csv_file)
+        except ValueError as exc:
+            st.error(f"CSV Error: {exc}")
+            df_raw = pd.DataFrame()
+
+        if not df_raw.empty:
+            csv_columns = df_raw.columns.tolist()
+            col_sec, col_email = st.columns(2)
+
+            with col_sec:
+                section_col_guess = next(
+                    (c for c in csv_columns if "section" in c.lower()),
+                    csv_columns[0],
+                )
+                section_col = st.selectbox(
+                    "Section column",
+                    options=csv_columns,
+                    index=csv_columns.index(section_col_guess),
+                    key=f"append_section_col_{rule_prefix}",
+                )
+
+            with col_email:
+                email_col_guess = next(
+                    (
+                        c
+                        for c in csv_columns
+                        if "email" in c.lower()
+                        or "sis login" in c.lower()
+                        or "login id" in c.lower()
+                    ),
+                    csv_columns[0],
+                )
+                email_col = st.selectbox(
+                    "Email / UID column",
+                    options=csv_columns,
+                    index=csv_columns.index(email_col_guess),
+                    key=f"append_email_col_{rule_prefix}",
+                )
+
+            if section_col == email_col:
+                st.warning("Section column and Email column must be different.")
+            else:
+                df = df_raw[[section_col, email_col]].copy()
+                df[email_col] = df[email_col].astype(str).str.strip()
+                df = df[
+                    df[email_col].notna()
+                    & (df[email_col] != "")
+                    & (df[email_col] != "nan")
+                ]
+                grouped_raw = df.groupby(section_col)[email_col].apply(list).to_dict()
+                append_grouped = {
+                    str(k): [str(u).strip() for u in v]
+                    for k, v in grouped_raw.items()
+                }
+                append_grouped = merge_sdc_sections(append_grouped)
+                append_sections = sorted(append_grouped.keys())
+
+                if append_sections:
+                    st.success(
+                        f"Prepared {len(append_sections)} section(s) and {len(df)} student row(s) for import."
+                    )
+                else:
+                    st.warning("No section data found in CSV after parsing.")
+else:
+    raw_input = st.text_area(
+        "Student emails / UIDs",
+        height=160,
+        key=f"append_manual_uids_{rule_prefix}",
+        placeholder="student1@ucdavis.edu\nstudent2@ucdavis.edu\n...",
+    )
+
+    emails = _normalize_uids(raw_input.splitlines())
+    if emails:
+        append_grouped = {"Manual": emails}
+        append_sections = ["Manual"]
+        st.success(f"Prepared {len(emails)} student(s) for import.")
+
+generated_session_rules: list[dict] = []
+if append_sections:
+    st.markdown("**Configure imported session windows**")
+    append_slot_configs: dict[str, dict] = {}
+
+    hdr0, hdr1, hdr2, hdr3, hdr4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
+    hdr0.markdown("**Section**")
+    hdr1.markdown("**Date**")
+    hdr2.markdown("**Start**")
+    hdr3.markdown("**End**")
+    hdr4.markdown("**DST Offset**")
+
+    for section in append_sections:
+        col0, col1, col2, col3, col4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
+
+        with col0:
+            with st.expander(f"{section} ({len(append_grouped[section])} students)"):
+                st.dataframe(
+                    pd.DataFrame(append_grouped[section], columns=["Email / UID"]),
+                    width='stretch',
+                    hide_index=True,
+                )
+
+        with col1:
+            sel_date_label = st.selectbox(
+                "Date",
+                options=_DATE_LABELS,
+                index=_DEFAULT_DATE_IDX,
+                key=f"append_date_{rule_prefix}_{section}",
+                label_visibility="collapsed",
+            )
+            sel_date = _DATE_VALUES[_DATE_LABELS.index(sel_date_label)]
+
+        with col2:
+            sel_start_label = st.selectbox(
+                "Start",
+                options=_TIME_LABELS,
+                index=_DEFAULT_START_IDX,
+                key=f"append_start_{rule_prefix}_{section}",
+                label_visibility="collapsed",
+            )
+            sel_start = _TIME_VALUES[_TIME_LABELS.index(sel_start_label)]
+
+        with col3:
+            sel_end_label = st.selectbox(
+                "End",
+                options=_TIME_LABELS,
+                index=_DEFAULT_END_IDX,
+                key=f"append_end_{rule_prefix}_{section}",
+                label_visibility="collapsed",
+            )
+            sel_end = _TIME_VALUES[_TIME_LABELS.index(sel_end_label)]
+
+        with col4:
+            st.markdown(
+                f"<br><code>{get_tz_label(selected_tz_name, sel_date)}</code>",
+                unsafe_allow_html=True,
+            )
+
+        append_slot_configs[section] = {
+            "date": sel_date,
+            "start": sel_start,
+            "end": sel_end,
+        }
+
+    generated_allow_access = build_allow_access(
+        append_sections,
+        append_grouped,
+        append_slot_configs,
+    )
+    generated_session_rules = [
+        r for r in generated_allow_access if _is_session_allow_access_rule(r)
+    ]
+
+    import_mode = st.selectbox(
+        "Import behavior",
+        options=["Merge by Session Window", "Append as New Sessions"],
+        key=f"import_mode_{rule_prefix}",
+        help=(
+            "Merge: combine UIDs into matching sessions (same comment + window). "
+            "Append: always create new session blocks."
+        ),
+    )
+
+    with st.expander("Import preview"):
+        st.markdown(_render_schedule_table(generated_session_rules, selected_tz_name))
+
+    if st.button("Apply Import to Editable Sessions"):
+        merged, next_seq = _merge_imported_rules(
+            st.session_state.editable_rules,
+            generated_session_rules,
+            merge_mode=import_mode,
+            rule_prefix=rule_prefix,
+            next_rule_seq=int(st.session_state.next_rule_seq),
+        )
+        st.session_state.editable_rules = merged
+        st.session_state.next_rule_seq = next_seq
+        st.success("Imported sessions have been applied to the editable schedule.")
+        st.rerun()
+
+st.divider()
+
+# ---------------------------------------------------------------------------
+# Step 5 — Review Diff and Submit Pull Request
+# ---------------------------------------------------------------------------
+
+st.header("Step 5 — Review and Submit Pull Request")
+
+final_editor_rules: list[dict] = st.session_state.editable_rules
+
+validation_errors: list[str] = []
+if not final_editor_rules:
+    validation_errors.append("At least one editable session is required.")
+
+for idx, rule in enumerate(final_editor_rules, start=1):
+    start_dt = datetime.datetime.combine(rule["start_date"], rule["start_time"])
+    end_dt = datetime.datetime.combine(rule["end_date"], rule["end_time"])
+    if start_dt >= end_dt:
+        validation_errors.append(
+            f"Session #{idx}: Start must be earlier than End."
+        )
+    if not rule.get("uids"):
+        validation_errors.append(f"Session #{idx}: UID list is empty.")
+
+for msg in validation_errors:
+    st.error(msg)
+
+final_allow_access = [
+    _editor_rule_to_allow_access_rule(r) for r in final_editor_rules
+] + copy.deepcopy(st.session_state.passthrough_allow_access)
+
+diff_summary = _calculate_access_diff(
+    st.session_state.original_editor_rules,
+    final_editor_rules,
+)
+
+pr_body_preview = build_pr_body_with_diff(
+    selected_assessment,
+    diff_summary,
+    final_allow_access,
+    selected_tz_name,
+)
+
+with st.expander("Pull Request preview", expanded=True):
+    st.markdown(pr_body_preview)
+
+if st.button(
+    "Generate and Create Pull Request",
+    type="primary",
+    width='stretch',
+    disabled=bool(validation_errors),
+):
+    # Detect stale source file before write (read-modify-write conflict guard)
+    with st.spinner("Checking source file for conflicts..."):
+        try:
+            latest_fetched = repo.get_contents(json_path, ref=repo.default_branch)
+            latest_file = latest_fetched[0] if isinstance(latest_fetched, list) else latest_fetched
+        except GithubException as exc:
+            st.error(
+                f"Failed to re-check `{json_path}`: "
+                f"{exc.data.get('message', str(exc))}"
+            )
+            st.stop()
+
+    if latest_file.sha != st.session_state.source_file_sha:
+        st.error(
+            "409 Conflict: `infoAssessment.json` changed on the remote branch "
+            "after hydration. Please refresh/reload latest data before submitting."
+        )
+        st.stop()
+
+    base_json = copy.deepcopy(st.session_state.base_json_snapshot)
+    base_json["allowAccess"] = final_allow_access
     updated_content = json.dumps(base_json, indent=2, ensure_ascii=False)
 
-    # --- 4. Create a new branch ---
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     branch_name = f"update-access-{selected_assessment}-{timestamp}"
 
     with st.spinner(f"Creating branch `{branch_name}`..."):
         try:
             default_ref = repo.get_branch(repo.default_branch)
-            base_sha = default_ref.commit.sha
             repo.create_git_ref(
-                ref=f"refs/heads/{branch_name}", sha=base_sha
+                ref=f"refs/heads/{branch_name}",
+                sha=default_ref.commit.sha,
             )
         except GithubException as exc:
             st.error(
@@ -1262,34 +1644,37 @@ if st.button(
             )
             st.stop()
 
-    # --- 5. Commit the modified file ---
-    commit_message = (
-        f"Auto-schedule: update allowAccess rules for {selected_assessment}"
-    )
+    commit_message = f"Scheduler sync: update allowAccess for {selected_assessment}"
     with st.spinner("Committing updated infoAssessment.json..."):
         try:
             repo.update_file(
                 path=json_path,
                 message=commit_message,
                 content=updated_content,
-                sha=file_obj.sha,
+                sha=latest_file.sha,
                 branch=branch_name,
             )
         except GithubException as exc:
-            st.error(
-                f"Failed to commit to branch `{branch_name}`: "
-                f"{exc.data.get('message', str(exc))}"
-            )
+            if exc.status == 409:
+                st.error(
+                    "409 Conflict: remote file changed during write. "
+                    "Please reload latest data and retry."
+                )
+            else:
+                st.error(
+                    f"Failed to commit to branch `{branch_name}`: "
+                    f"{exc.data.get('message', str(exc))}"
+                )
             st.stop()
 
-    # --- 6. Open Pull Request ---
-    pr_title = (
-        f"Auto-schedule: Update access rules for {selected_assessment}"
+    pr_title = f"Scheduler sync: Update access rules for {selected_assessment}"
+    pr_body = build_pr_body_with_diff(
+        selected_assessment,
+        diff_summary,
+        final_allow_access,
+        selected_tz_name,
     )
-    pr_body = build_pr_body(
-        selected_assessment, sections, slot_configs, grouped,
-        selected_tz_name, sdc_groups=sdc_groups,
-    )
+
     with st.spinner("Creating Pull Request..."):
         try:
             pr = repo.create_pull(
@@ -1299,13 +1684,18 @@ if st.button(
                 base=repo.default_branch,
             )
         except GithubException as exc:
-            st.error(
-                f"Failed to create the Pull Request: "
-                f"{exc.data.get('message', str(exc))}"
-            )
+            if exc.status == 409:
+                st.error(
+                    "409 Conflict while creating PR. The remote branch changed; "
+                    "please refresh and retry."
+                )
+            else:
+                st.error(
+                    f"Failed to create Pull Request: "
+                    f"{exc.data.get('message', str(exc))}"
+                )
             st.stop()
 
-    # --- 7. Success ---
     st.success("Pull Request created successfully.")
     st.markdown(f"**Pull Request URL:** {pr.html_url}")
 
@@ -1319,8 +1709,10 @@ if st.button(
             "pr_url": pr.html_url,
             "assessment": selected_assessment,
             "term": selected_term,
-            "sections": len(sections),
-            "sdc_groups": len(sdc_groups) if sdc_groups else 0,
+            "editable_sessions": len(final_editor_rules),
+            "added_lines": len(diff_summary.get("added", [])),
+            "modified_lines": len(diff_summary.get("modified", [])),
+            "deleted_lines": len(diff_summary.get("deleted", [])),
         },
     )
 
