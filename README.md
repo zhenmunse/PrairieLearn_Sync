@@ -1,180 +1,122 @@
 # PrairieLearn Course Automation Tools
 
-A collection of Python utilities for automating administrative workflows in PrairieLearn-based university courses. This repository contains two independent tools: a Streamlit web application for generating assessment configuration files, and a command-line ETL pipeline for synchronizing grades from PrairieLearn to Canvas.
+This repository collects course-operation tools used around PrairieLearn exams:
 
----
+- **PrairieLearn Exam Scheduler / Pull Request Scheduler**: a Streamlit app that generates `infoAssessment.json` access rules from a Canvas roster and opens a GitHub pull request.
+- **LiveCCTV**: a Streamlit page for monitoring live PrairieLearn exam sessions on a lab-seat map.
+- **PrairieLearn to Canvas sync pipeline**: a command-line script that transforms PrairieLearn grade exports into Canvas bulk grade updates.
+
+CSV files are treated as temporary semester data. Do not rely on checked-in CSV files for future offerings; generate or upload fresh data each term.
 
 ## Repository Structure
 
-```
+```text
 .
-├── app.py                  # Streamlit GUI — infoAssessment.json generator
-├── sync_pipeline.py        # CLI pipeline — PrairieLearn to Canvas grade sync
-├── requirements.txt        # Python package dependencies
-├── run_venv.bat / run_venv.sh       # Launch using an isolated virtual environment
-├── run_system.bat / run_system.sh   # Launch using the system Python installation
-├── example.json            # Reference infoAssessment.json template
-├── export.csv              # Sample Canvas Roster CSV
-└── Example/                # Sample PrairieLearn question structures
+├── app.py                         # Streamlit main app: exam scheduling + GitHub PR workflow
+├── pages/
+│   └── live_cctv.py               # Streamlit multipage page: LiveCCTV dashboard
+├── pl_api_client.py               # PrairieLearn API helper used by LiveCCTV
+├── sync_pipeline.py               # CLI: PrairieLearn grade export -> Canvas API payload
+├── audit_log.py                   # Shared local audit logger
+├── examples/
+│   ├── infoAssessment.template.json
+│   └── prairielearn-questions/    # Sample PrairieLearn question structures
+├── docs/
+│   └── STRUCTURE.md               # Maintenance notes for future semesters
+├── requirements.txt               # Python dependencies
+├── run_venv.bat / run_venv.sh     # Launch app with a local virtual environment
+└── run_system.bat / run_system.sh # Launch app with system Python
 ```
 
----
+Ignored local/runtime paths:
 
-## Tool 1: infoAssessment.json Generator (app.py)
+- `.venv/`, `__pycache__/`
+- `.streamlit/`, `.pl_credentials.json`
+- `logs/`
+- `temp-data/`
+- `*.csv`
+
+## Tool 1: Exam Scheduler / PR Scheduler
 
 ### Purpose
 
-Generating PrairieLearn `infoAssessment.json` files with correct `allowAccess` rules requires manually mapping each course section to a time slot and a list of student UIDs. This process is error-prone when performed by hand. This tool provides a web-based graphical interface that automates the process from a Canvas Roster CSV export.
+Generating PrairieLearn `infoAssessment.json` files with correct `allowAccess` rules requires mapping each course section to a time slot and a list of student UIDs. This tool provides a web interface that automates the process from a Canvas roster CSV export.
 
-### How It Works
+### Workflow
 
-1. The user connects to the GitHub repository using a Personal Access Token.
-2. The user selects the target Term and Assessment from cascading dropdowns populated from the repository.
-3. The user uploads a Canvas Roster CSV and maps the section and email columns.
-4. A start and end time (with timezone selection and automatic DST resolution) is configured independently for each detected section.
-5. The tool commits the updated `infoAssessment.json` to a new branch and opens a Pull Request targeting the default branch.
+1. Enter a GitHub repository URL and Personal Access Token.
+2. Select the target term and assessment from the repository's `courseInstances/` tree.
+3. Upload a Canvas roster CSV and map the section/email columns.
+4. Configure start and end times for each section.
+5. Commit the updated `infoAssessment.json` to a new branch and open a pull request.
 
-The original JSON structure (metadata, `zones`, etc.) is preserved. Only the `allowAccess` array is replaced.
+The original JSON structure is preserved. Only the `allowAccess` array is replaced.
 
-### Running the Application
-
-Use one of the provided launch scripts, which handle dependency installation automatically:
+### Run
 
 ```bat
-:: Windows — isolated virtual environment (recommended)
 run_venv.bat
-
-:: Windows — system Python
-run_system.bat
 ```
 
 ```bash
-# macOS / Linux — isolated virtual environment (recommended)
-chmod +x run_venv.sh && ./run_venv.sh
-
-# macOS / Linux — system Python
-chmod +x run_system.sh && ./run_system.sh
+chmod +x run_venv.sh
+./run_venv.sh
 ```
 
-Alternatively, install dependencies manually and launch directly:
+Manual launch:
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The application will be available at `http://localhost:8501` by default.
+The app is usually available at `http://localhost:8501`.
 
-### Input Requirements
+## Tool 2: LiveCCTV
 
-| Input | Format | Required |
-|---|---|---|
-| GitHub Repository URL | HTTPS URL | Yes |
-| GitHub Personal Access Token | PAT with Contents and Pull Requests permissions | Yes |
-| Student roster | CSV exported from Canvas Grades | Yes |
+LiveCCTV is exposed as a Streamlit multipage page under `pages/live_cctv.py`. Launch the Streamlit app normally, then choose the LiveCCTV page in the sidebar.
 
-The Canvas Roster CSV must contain at least one column identifying the section and one column containing the student email or SIS Login ID. Column names are user-selectable via dropdown menus in the interface.
+Configuration is read from Streamlit secrets or environment variables:
 
-### Output Format
-
-Each entry in the generated `allowAccess` array follows this schema:
-
-```json
-{
-  "mode": "Exam",
-  "startDate": "YYYY-MM-DDTHH:MM:SS",
-  "endDate": "YYYY-MM-DDTHH:MM:SS",
-  "uids": ["student1@ucdavis.edu", "student2@ucdavis.edu"]
-}
+```text
+PL_API_TOKEN
+PL_BASE_URL
+COURSE_INSTANCE_ID
+ASSESSMENT_ID
 ```
 
-Times are written as wall-clock local time in the selected timezone. The timezone and DST offset are recorded in the Pull Request description for reference.
+For deployed or shared use, prefer `.streamlit/secrets.toml` and keep that file out of version control.
 
----
+## Tool 3: PrairieLearn to Canvas Sync
 
-## Tool 2: Grade Synchronization Pipeline (sync_pipeline.py)
+This command-line ETL pipeline reads a PrairieLearn `*_points_by_username.csv` export, converts it into the Canvas Submissions Bulk Update API payload, and optionally posts it to Canvas.
 
-### Purpose
-
-This ETL (Extract, Transform, Load) pipeline automates the synchronization of grades from a PrairieLearn CSV export to a Canvas assignment via the Canvas Submissions Bulk Update API.
-
-### How It Works
-
-1. **Extract**: Reads a PrairieLearn `*_points_by_username.csv` export.
-2. **Transform**: Cleans the dataset and converts it into the Canvas API batch payload format, mapping student usernames to SIS User IDs.
-3. **Load**: Submits a bulk grade update via an HTTP POST request to the Canvas API.
-
-### Prerequisites
-
-- Python 3.8 or later
-- A valid Canvas API token with submission write permissions
-
-Store the API token as an environment variable. Do not hardcode credentials in the script or commit them to source control.
+Set the Canvas token as an environment variable:
 
 ```bash
-# Unix / macOS
 export CANVAS_API_TOKEN="your_canvas_token_here"
+```
 
-# Windows (PowerShell)
+PowerShell:
+
+```powershell
 $env:CANVAS_API_TOKEN = "your_canvas_token_here"
 ```
 
-### Usage
+Dry run:
 
 ```bash
-python sync_pipeline.py --csv <path_to_csv> --course <canvas_course_id> --assignment <canvas_assignment_id>
+python sync_pipeline.py --csv temp-data/ECS_32A_TEST26_Q2_points_by_username.csv --course 12345 --assignment 67890
 ```
 
-### Command-Line Arguments
-
-| Argument | Required | Description |
-|---|---|---|
-| `--csv` | Yes | Path to the PrairieLearn export CSV |
-| `--course` | Yes | Target Canvas Course ID |
-| `--assignment` | Yes | Target Canvas Assignment ID |
-| `--domain` | No | Canvas instance base URL (default: `https://canvas.ucdavis.edu`) |
-| `--commit` | No | Disable dry-run mode and execute the API write |
-
-### Dry-Run Mode
-
-By default, the pipeline runs in **dry-run mode**: it extracts and transforms the data and logs a payload preview, but does not send any request to the Canvas API. This is the recommended mode for validating data before committing a grade update.
-
-To perform the actual grade upload, append the `--commit` flag:
+Actual upload:
 
 ```bash
-python sync_pipeline.py \
-    --csv ECS_32A_TEST26_Q2_points_by_username.csv \
-    --course 12345 \
-    --assignment 67890 \
-    --commit
+python sync_pipeline.py --csv temp-data/ECS_32A_TEST26_Q2_points_by_username.csv --course 12345 --assignment 67890 --commit
 ```
-
----
-
-## Installation
-
-The launch scripts (`run_venv.bat` / `run_venv.sh` and `run_system.bat` / `run_system.sh`) handle dependency installation automatically. For manual setup:
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd <repository-directory>
-
-# Create and activate a virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate       # Unix / macOS
-.venv\Scripts\activate          # Windows
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
----
 
 ## Security Notes
 
-- The GitHub Personal Access Token must be entered at runtime only. It is never stored to disk by this tool and must never be committed to version control.
-- The Canvas API token for `sync_pipeline.py` must be supplied via the `CANVAS_API_TOKEN` environment variable. It must never be committed to version control.
-- Generated `infoAssessment.json` files may contain student email addresses. Review your institution's data policy before committing such files to a shared repository. The `.gitignore` in this project excludes the generated output file by default.
-
-
+- GitHub PATs and PrairieLearn/Canvas API tokens must not be committed.
+- `.pl_credentials.json`, `.streamlit/`, `logs/`, and CSV data are ignored.
+- Generated `infoAssessment.json` files may contain student identifiers; review course and institution data policies before committing them.
