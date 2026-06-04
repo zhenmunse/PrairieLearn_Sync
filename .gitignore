@@ -75,6 +75,10 @@ ehthumbs.db
 # Local development and testing files
 /local/
 
+# Semester-specific data exports
+*.csv
+temp-data/
+
 # Generated output files (not committed to source control)
 infoAssessment.json
 
