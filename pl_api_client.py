@@ -151,7 +151,7 @@ def _safe_get(
 
 @st.cache_data(ttl=300, show_spinner="Loading assessments...")
 def fetch_assessments(
-    _token: str,
+    token: str,
     base_url: str,
     course_instance_id: str,
 ) -> list[dict[str, Any]]:
@@ -159,9 +159,9 @@ def fetch_assessments(
     GET /pl/api/v1/course_instances/{cid}/assessments
 
     Returns a list of assessment dicts for a specific course instance.
-    Cached for 5 minutes.
+    Cached for 5 minutes, partitioned by token and request parameters.
     """
-    session = _build_session(_token)
+    session = _build_session(token)
     url = f"{base_url}/pl/api/v1/course_instances/{course_instance_id}/assessments"
     data = _safe_get(session, url)
     if isinstance(data, list):
@@ -319,7 +319,7 @@ def _extract_latest_ip(events: list[dict[str, Any]]) -> tuple[str | None, str | 
 
 @st.cache_data(ttl=15, show_spinner="Fetching live data from PrairieLearn...")
 def fetch_live_exam_status(
-    _token: str,
+    token: str,
     base_url: str,
     course_instance_id: str,
     assessment_id: str,
@@ -333,9 +333,9 @@ def fetch_live_exam_status(
 
     Parameters
     ----------
-    _token : str
-        PL API token.  Prefixed with ``_`` so Streamlit's cache hashing
-        skips it (tokens should not appear in cache keys).
+    token : str
+        PL API token. Included in Streamlit's hashed cache key so another
+        credential cannot reuse this token's authorized response.
     base_url : str
         PrairieLearn server URL (no trailing slash).
     course_instance_id : str
@@ -343,7 +343,7 @@ def fetch_live_exam_status(
     assessment_id : str
         Numeric assessment ID.
     """
-    session = _build_session(_token)
+    session = _build_session(token)
 
     # Step 1: Fetch all assessment instances
     instances = _fetch_assessment_instances(

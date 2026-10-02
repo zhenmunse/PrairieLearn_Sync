@@ -14,7 +14,6 @@ import copy
 import datetime
 import json
 import re
-from pathlib import Path
 
 import pandas as pd
 import pytz
@@ -31,34 +30,6 @@ JSON_FILE_NAME = "infoAssessment.json"
 
 # SDC default parameters (easily editable)
 SDC_BASE_EXAM_MIN = 50  # fallback base exam length (minutes)
-
-# Credential persistence — stores repo URL & PAT in a local JSON file
-# so users don't need to re-enter them on every visit.
-_CREDENTIALS_FILE = Path(__file__).parent / ".pl_credentials.json"
-
-
-def _load_credentials() -> dict:
-    """Read saved credentials from the local file."""
-    if _CREDENTIALS_FILE.exists():
-        try:
-            return json.loads(_CREDENTIALS_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
-
-def _save_credentials(repo_url: str, pat: str) -> None:
-    """Persist repo URL and PAT to the local credentials file."""
-    _CREDENTIALS_FILE.write_text(
-        json.dumps({"repo_url": repo_url, "pat": pat}, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _clear_credentials() -> None:
-    """Delete the saved credentials file."""
-    _CREDENTIALS_FILE.unlink(missing_ok=True)
-
 
 # Ordered list of (display_label, tz_name) tuples for the timezone selector.
 # The first entry is the default (California).
@@ -218,6 +189,38 @@ _DEFAULT_START_IDX = _TIME_LABELS.index("10:00")
 _DEFAULT_END_IDX = _TIME_LABELS.index("10:50")
 
 
+def _parse_clock_time(value: str) -> datetime.time:
+    """Accept a complete 24-hour H:MM or HH:MM value, never a substring."""
+    if not re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", value.strip()):
+        raise ValueError("Enter a 24-hour time such as 9:00 or 19:00.")
+    hour, minute = map(int, value.strip().split(":"))
+    return datetime.time(hour, minute)
+
+
+def _clock_input(label, value, key, *, container=st, **kwargs):
+    if key not in st.session_state:
+        st.session_state[key] = value.strftime("%H:%M")
+    raw = container.text_input(
+        label, key=key,
+        autocomplete="off", placeholder="HH:MM", **kwargs,
+    )
+    try:
+        return _parse_clock_time(raw)
+    except ValueError as exc:
+        container.error(str(exc))
+        st.stop()
+
+
+def _default_import_end(start_key: str, end_key: str) -> None:
+    """Start/date changes suggest 50 minutes; End remains manually editable."""
+    try:
+        start = _parse_clock_time(st.session_state.get(start_key, "10:00"))
+    except ValueError:
+        return  # The input itself displays the validation error.
+    end = datetime.datetime.combine(datetime.date.today(), start) + datetime.timedelta(minutes=50)
+    st.session_state[end_key] = end.strftime("%H:%M")
+
+
 def _normalize_name(name: str) -> str:
     """Lowercase, strip, collapse whitespace for fuzzy name matching."""
     return " ".join(str(name).lower().split())
@@ -344,13 +347,13 @@ def build_allow_access(
         cfg = slot_configs[section]
         # Compute timeLimitMin from the section's own start/end window
         _start_dt = datetime.datetime.combine(cfg["date"], cfg["start"])
-        _end_dt = datetime.datetime.combine(cfg["date"], cfg["end"])
+        _end_dt = datetime.datetime.combine(cfg.get("end_date", cfg["date"]), cfg["end"])
         _section_limit = max(int((_end_dt - _start_dt).total_seconds() / 60), 1)
         entries.append(
             {
                 "comment": section,
                 "startDate": combine_datetime(cfg["date"], cfg["start"]),
-                "endDate": combine_datetime(cfg["date"], cfg["end"]),
+                "endDate": combine_datetime(cfg.get("end_date", cfg["date"]), cfg["end"]),
                 "uids": sorted(grouped[section]),
                 "credit": 100,
                 "timeLimitMin": _section_limit,
@@ -407,7 +410,7 @@ def build_pr_body(
         rows.append(
             f"| {section} | {len(grouped[section])} "
             f"| {combine_datetime(cfg['date'], cfg['start'])} "
-            f"| {combine_datetime(cfg['date'], cfg['end'])} "
+            f"| {combine_datetime(cfg.get('end_date', cfg['date']), cfg['end'])} "
             f"| {tz_label} |"
         )
 
@@ -871,12 +874,10 @@ def _merge_imported_rules(
 
 
 def disconnect():
-    """Reset all GitHub-related session state."""
-    for key, default in _STATE_DEFAULTS.items():
-        # Reset to original default (make a copy for mutable defaults)
-        st.session_state[key] = (
-            default.copy() if isinstance(default, (dict, list)) else default
-        )
+    """Discard this session's credentials, authenticated clients and data."""
+    # Run as a button callback, before widgets are instantiated on the rerun.
+    # This also removes dynamic editor/upload state from the previous login.
+    st.session_state.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -886,19 +887,18 @@ def disconnect():
 with st.sidebar:
     st.header("Step 1 — GitHub Authentication")
 
-    _creds = _load_credentials()
-
     repo_url_input = st.text_input(
         "Repository URL",
-        value=_creds.get("repo_url", ""),
+        key="github_repo_url",
         placeholder="https://github.com/owner/pl-course-repo",
         help="Full URL of the PrairieLearn course repository on GitHub.",
     ) or ""
 
     pat_input = st.text_input(
         "Personal Access Token (PAT)",
-        value=_creds.get("pat", ""),
+        key="github_pat",
         type="password",
+        autocomplete="current-password",
         help=(
             "A GitHub PAT with Contents (Read & Write) and "
             "Pull Requests (Read & Write) permissions."
@@ -930,11 +930,6 @@ with st.sidebar:
                         st.session_state.repo_full_name = repo_obj.full_name
                         st.session_state.terms_cache = []
                         st.session_state.assessments_cache = {}
-
-                        # Persist credentials locally
-                        _save_credentials(
-                            repo_url_input.strip(), pat_input.strip()
-                        )
 
                         audit(
                             "auth",
@@ -975,25 +970,21 @@ with st.sidebar:
         repo = st.session_state.repo
         st.success(f"Connected: **{repo.full_name}**")
         st.caption(f"Default branch: `{repo.default_branch}`")
-        if st.button("Disconnect", width='stretch'):
-            disconnect()
-            st.rerun()
+        st.button("Disconnect", width='stretch', on_click=disconnect)
 
     st.divider()
 
-    if st.button(
+    st.button(
         "\U0001f5d1\ufe0f Clear All",
         width='stretch',
-        help="Clear saved credentials (repo URL & PAT) and disconnect.",
-    ):
-        _clear_credentials()
-        disconnect()
-        st.rerun()
+        help="Clear credentials and data from this session and disconnect.",
+        on_click=disconnect,
+    )
 
     st.caption(
         "Required PAT scopes: `Contents: Read & Write`, "
         "`Pull Requests: Read & Write`.  \n"
-        "Credentials are saved locally in `.pl_credentials.json`."
+        "Use your browser's password manager to save and fill your PAT."
     )
 
 # ---------------------------------------------------------------------------
@@ -1250,22 +1241,22 @@ for idx, rule in enumerate(st.session_state.editable_rules, start=1):
             value=rule["start_date"],
             key=f"edit_start_date_{rid}",
         )
-        start_time = c4.time_input(
+        start_time = _clock_input(
             "Start time",
             value=rule["start_time"],
-            step=300,
-            key=f"edit_start_time_{rid}",
+            container=c4,
+            key=f"edit_start_time_text_{rid}",
         )
         end_date = c5.date_input(
             "End date",
             value=rule["end_date"],
             key=f"edit_end_date_{rid}",
         )
-        end_time = c6.time_input(
+        end_time = _clock_input(
             "End time",
             value=rule["end_time"],
-            step=300,
-            key=f"edit_end_time_{rid}",
+            container=c6,
+            key=f"edit_end_time_text_{rid}",
         )
 
         c7, c8, c9 = st.columns(3)
@@ -1455,6 +1446,7 @@ else:
 generated_session_rules: list[dict] = []
 if append_sections:
     st.markdown("**Configure imported session windows**")
+    st.caption("Use 24-hour times (HH:MM). Changing Date or Start sets End to 50 minutes later; you can then edit End.")
     append_slot_configs: dict[str, dict] = {}
 
     hdr0, hdr1, hdr2, hdr3, hdr4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
@@ -1465,6 +1457,8 @@ if append_sections:
     hdr4.markdown("**DST Offset**")
 
     for section in append_sections:
+        start_key = f"append_start_text_{rule_prefix}_{section}"
+        end_key = f"append_end_text_{rule_prefix}_{section}"
         col0, col1, col2, col3, col4 = st.columns([2.2, 1.8, 1.3, 1.3, 1.4])
 
         with col0:
@@ -1482,28 +1476,31 @@ if append_sections:
                 index=_DEFAULT_DATE_IDX,
                 key=f"append_date_{rule_prefix}_{section}",
                 label_visibility="collapsed",
+                on_change=_default_import_end,
+                args=(start_key, end_key),
             )
             sel_date = _DATE_VALUES[_DATE_LABELS.index(sel_date_label)]
 
         with col2:
-            sel_start_label = st.selectbox(
+            sel_start = _clock_input(
                 "Start",
-                options=_TIME_LABELS,
-                index=_DEFAULT_START_IDX,
-                key=f"append_start_{rule_prefix}_{section}",
+                value=datetime.time(10, 0),
+                key=start_key,
                 label_visibility="collapsed",
+                on_change=_default_import_end,
+                args=(start_key, end_key),
             )
-            sel_start = _TIME_VALUES[_TIME_LABELS.index(sel_start_label)]
 
         with col3:
-            sel_end_label = st.selectbox(
+            sel_end = _clock_input(
                 "End",
-                options=_TIME_LABELS,
-                index=_DEFAULT_END_IDX,
-                key=f"append_end_{rule_prefix}_{section}",
+                value=datetime.time(10, 50),
+                key=end_key,
                 label_visibility="collapsed",
             )
-            sel_end = _TIME_VALUES[_TIME_LABELS.index(sel_end_label)]
+            end_date = sel_date + datetime.timedelta(days=int(sel_end < sel_start))
+            if end_date != sel_date:
+                st.caption(f"Ends next day: {end_date:%Y-%m-%d}")
 
         with col4:
             st.markdown(
@@ -1515,6 +1512,7 @@ if append_sections:
             "date": sel_date,
             "start": sel_start,
             "end": sel_end,
+            "end_date": end_date,
         }
 
     generated_allow_access = build_allow_access(

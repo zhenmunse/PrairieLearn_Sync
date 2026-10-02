@@ -1,7 +1,7 @@
 """
 TLC Live CCTV -- Real-Time Exam Proctoring Dashboard
 =====================================================
-Maps live PrairieLearn session data onto a physical computer-lab seat grid so
+Groups live PrairieLearn session data by IP address so
 proctors can monitor exam progress and catch anomalies at a glance.
 
 This module is designed as a standalone Streamlit page (placed in ``pages/``).
@@ -11,7 +11,7 @@ instance.
 
 Colour semantics for each seat card:
   - Grey   : vacant (no active session on that IP)
-  - Green  : in-progress and IP matches the physical seat
+  - Green  : an exam is in progress on this IP
   - Blue   : submitted
   - Red    : anomaly (UID not on roster, or duplicate IP usage)
 """
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+from html import escape
 import ipaddress
 import random
 from dataclasses import dataclass, field
@@ -64,12 +65,6 @@ LAB_CIDRS: list[str] = [
     "128.120.215.196/32",
 ]
 
-# Grid dimensions for the 2-D seat map.
-GRID_COLS: int = 10
-
-# Row labels: A, B, C, ...
-_ROW_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
 # Ordered list of (display_label, tz_name) tuples for the timezone selector.
 # Default uses California time (auto DST: PST/PDT).
 COMMON_TIMEZONES: list[tuple[str, str]] = [
@@ -90,8 +85,7 @@ COMMON_TIMEZONES: list[tuple[str, str]] = [
 
 @dataclass(frozen=True)
 class Seat:
-    """One physical workstation in the lab."""
-    label: str          # e.g. "A1"
+    """One monitored IP address; no physical seat mapping is assumed."""
     ip: str             # e.g. "169.237.128.161"
 
 
@@ -118,20 +112,14 @@ class Alert:
 
 def build_lab_topology(cidrs: list[str]) -> list[Seat]:
     """
-    Expand CIDR blocks into usable host addresses and assign sequential
-    seat labels (A1, A2, ... B1, B2, ...).
+    Expand CIDR blocks into usable host addresses for the IP overview.
     """
     hosts: list[str] = []
     for cidr in cidrs:
         net = ipaddress.ip_network(cidr, strict=False)
         hosts.extend(str(h) for h in net.hosts())
 
-    seats: list[Seat] = []
-    for idx, ip in enumerate(hosts):
-        row_letter = _ROW_LABELS[idx // GRID_COLS]
-        col_number = (idx % GRID_COLS) + 1
-        seats.append(Seat(label=f"{row_letter}{col_number}", ip=ip))
-    return seats
+    return [Seat(ip=ip) for ip in dict.fromkeys(hosts)]
 
 
 def build_ip_to_seat_map(seats: list[Seat]) -> dict[str, Seat]:
@@ -381,7 +369,6 @@ def detect_anomalies(
     # Rule 3: Multiple UIDs sharing the same lab IP
     for ip, uids in ip_usage.items():
         if len(uids) > 1 and ip in ip_seat_map:
-            seat_label = ip_seat_map[ip].label
             uid_list = ", ".join(uids)
             # Use the most recent last_active time from conflicting sessions
             conflicting_events = [ev for ev in events if ev.current_ip == ip and ev.status == "in_progress"]
@@ -389,7 +376,7 @@ def detect_anomalies(
             alerts.append(Alert(
                 severity="critical",
                 message=(
-                    f"DUPLICATE IP: Seat {seat_label} ({ip}) is shared "
+                    f"DUPLICATE IP: {ip} is shared "
                     f"by {len(uids)} sessions: [{uid_list}]"
                 ),
                 timestamp=alert_time,
@@ -418,11 +405,11 @@ def resolve_seat_states(
     tz_name: str,
 ) -> dict[str, dict[str, Any]]:
     """
-    For every physical seat, determine its display state and the occupant info.
+    For every monitored IP, determine its display state and active examinees.
 
-    Returns a dict keyed by seat label:
+    Returns a dict keyed by IP address:
         {
-            "A1": {
+            "169.237.128.161": {
                 "state": "normal" | "submitted" | "anomaly" | "vacant",
                 "uid": str | None,
                 "ip": str,
@@ -443,24 +430,24 @@ def resolve_seat_states(
     for seat in seats:
         evs = ip_events.get(seat.ip, [])
         if not evs:
-            result[seat.label] = {
+            result[seat.ip] = {
                 "state": _STATUS_VACANT,
                 "uid": None,
                 "ip": seat.ip,
                 "last_active": None,
-                "tooltip": f"{seat.label} | {seat.ip} | Vacant",
+                "tooltip": f"{seat.ip} | No active exam",
             }
             continue
 
         # If multiple sessions on one IP, mark anomaly
         if len(evs) > 1:
             uids = ", ".join(e.uid for e in evs)
-            result[seat.label] = {
+            result[seat.ip] = {
                 "state": _STATUS_ANOMALY,
                 "uid": uids,
                 "ip": seat.ip,
                 "last_active": evs[0].last_active,
-                "tooltip": f"{seat.label} | {seat.ip} | CONFLICT: {uids}",
+                "tooltip": f"{seat.ip} | CONFLICT: {uids}",
             }
             continue
 
@@ -468,13 +455,13 @@ def resolve_seat_states(
 
         # UID not on roster → anomaly
         if ev.uid not in roster_set:
-            result[seat.label] = {
+            result[seat.ip] = {
                 "state": _STATUS_ANOMALY,
                 "uid": ev.uid,
                 "ip": seat.ip,
                 "last_active": ev.last_active,
                 "tooltip": (
-                    f"{seat.label} | {seat.ip} | "
+                    f"{seat.ip} | "
                     f"UNAUTHORIZED: {ev.uid}"
                 ),
             }
@@ -486,13 +473,13 @@ def resolve_seat_states(
             state = _STATUS_NORMAL
 
         active_str = _fmt_time_for_tz(ev.last_active, tz_name)
-        result[seat.label] = {
+        result[seat.ip] = {
             "state": state,
             "uid": ev.uid,
             "ip": seat.ip,
             "last_active": ev.last_active,
             "tooltip": (
-                f"{seat.label} | {seat.ip} | "
+                f"{seat.ip} | "
                 f"{ev.uid} | {ev.status} | Last: {active_str}"
             ),
         }
@@ -508,7 +495,7 @@ _SEAT_CSS = """
 <style>
 .cctv-grid {
     display: grid;
-    grid-template-columns: repeat(""" + str(GRID_COLS) + """, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
     gap: 6px;
     padding: 8px;
 }
@@ -538,11 +525,10 @@ _SEAT_CSS = """
     font-size: 13px;
 }
 .seat-uid {
-    font-size: 10px;
-    opacity: 0.85;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-size: 12px;
+    opacity: 0.9;
+    white-space: normal;
+    overflow-wrap: anywhere;
     max-width: 100%;
 }
 
@@ -581,28 +567,8 @@ _SEAT_CSS = """
     visibility: visible;
 }
 
-/* Row separator labels */
-.cctv-row-label {
-    grid-column: 1 / -1;
-    font-weight: 700;
-    font-size: 13px;
-    color: #555;
-    padding: 4px 0 0 4px;
-    border-bottom: 1px solid #ddd;
-    margin-top: 4px;
-}
 </style>
 """
-
-
-def _uid_display(uid: str | None) -> str:
-    """Shorten a UID for the seat card (prefix before '@')."""
-    if not uid:
-        return "---"
-    parts = uid.split(",")
-    if len(parts) > 1:
-        return f"{len(parts)} UIDs"
-    return uid.split("@")[0] if "@" in uid else uid[:12]
 
 
 def render_seat_map_html(
@@ -610,34 +576,25 @@ def render_seat_map_html(
     seat_states: dict[str, dict[str, Any]],
 ) -> str:
     """
-    Build a complete HTML string for the 2-D lab map with colour-coded seats,
-    hover tooltips, and row separators.
+    Build responsive IP cards with full examinee emails and status tooltips.
     """
     cards: list[str] = []
-    current_row = ""
 
     for seat in seats:
-        row_letter = seat.label[0]
-        if row_letter != current_row:
-            current_row = row_letter
-            cards.append(
-                f'<div class="cctv-row-label">Row {row_letter}</div>'
-            )
-
-        info = seat_states.get(seat.label, {
+        info = seat_states.get(seat.ip, {
             "state": _STATUS_VACANT,
             "uid": None,
-            "tooltip": f"{seat.label} | {seat.ip} | N/A",
+            "tooltip": f"{seat.ip} | N/A",
         })
         state_cls = f"state-{info['state']}"
-        uid_short = _uid_display(info.get("uid"))
-        tooltip = info.get("tooltip", "")
+        email = escape(info.get("uid") or "No active exam")
+        tooltip = escape(info.get("tooltip", ""))
 
         cards.append(
             f'<div class="cctv-seat {state_cls}" title="">'
             f'  <span class="seat-tip">{tooltip}</span>'
-            f'  <span class="seat-label">{seat.label}</span>'
-            f'  <span class="seat-uid">{uid_short}</span>'
+            f'  <span class="seat-label">{escape(seat.ip)}</span>'
+            f'  <span class="seat-uid">{email}</span>'
             f'</div>'
         )
 
@@ -700,7 +657,7 @@ def main() -> None:
     st.title("TLC Live CCTV -- Exam Proctoring Dashboard")
     st.caption(
         "Real-time holographic view of the computer lab. "
-        "Seat colours indicate student status; red seats require immediate attention."
+        "Cards show each IP and the email of anyone currently taking an exam. Red cards indicate anomalies."
     )
 
     # ------------------------------------------------------------------
@@ -771,6 +728,7 @@ def main() -> None:
             pl_token = st.text_input(
                 "API Token",
                 type="password",
+                autocomplete="current-password",
                 help="Personal Access Token for PrairieLearn.",
             ).strip()
 
@@ -833,7 +791,7 @@ def main() -> None:
 
         st.divider()
         st.markdown(
-            f"**Lab capacity:** {len(seats)} seats  \n"
+            f"**Monitored IPs:** {len(seats)}  \n"
             f"**Roster size:** {len(roster)} students  \n"
             f"**IP ranges:** {', '.join(LAB_CIDRS)}"
         )
@@ -941,14 +899,14 @@ def main() -> None:
     col_map, col_feed = st.columns([3, 1])
 
     with col_map:
-        st.subheader("Physical Seat Map")
+        st.subheader("IP Overview")
         map_html = render_seat_map_html(seats, seat_states)
         st_html.html(map_html, height=620, scrolling=True)
 
         # Legend
         st.markdown(
             '<div style="display:flex;gap:18px;font-size:13px;padding:4px 8px;">'
-            '<span style="color:#888;">&#9632; Vacant</span>'
+            '<span style="color:#888;">&#9632; No active exam</span>'
             '<span style="color:#27ae60;">&#9632; In Progress</span>'
             '<span style="color:#2980b9;">&#9632; Submitted</span>'
             '<span style="color:#e74c3c;">&#9632; Anomaly</span>'

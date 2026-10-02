@@ -118,5 +118,16 @@ python sync_pipeline.py --csv temp-data/ECS_32A_TEST26_Q2_points_by_username.csv
 ## Security Notes
 
 - GitHub PATs and PrairieLearn/Canvas API tokens must not be committed.
+- Token fields use password inputs with `autocomplete="current-password"` so
+  the visitor's browser/password manager can offer to save and fill them.
+  The app does not save credentials for autofill or prefill token fields.
+  Active input and API client state remain session-local; Disconnect / Clear All
+  clears that session's state, not the browser's saved passwords.
+- Legacy `.pl_credentials.json` files are no longer read or written. After
+  upgrading, remove the old file on the deployment host and revoke/rotate any
+  PAT that may have been exposed. Restart the app to end pre-upgrade sessions.
+- Live CCTV's explicit **Env / Secrets** mode uses deployment-wide credentials
+  and makes their data available to visitors. Use it only in a trusted,
+  access-controlled deployment; **Manual** mode uses each visitor's own token.
 - `.pl_credentials.json`, `.streamlit/`, `logs/`, and CSV data are ignored.
 - Generated `infoAssessment.json` files may contain student identifiers; review course and institution data policies before committing them.
