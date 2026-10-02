@@ -50,7 +50,10 @@ Generating PrairieLearn `infoAssessment.json` files with correct `allowAccess` r
 4. Configure start and end times for each section.
 5. Commit the updated `infoAssessment.json` to a new branch and open a pull request.
 
-The original JSON structure is preserved. Only the `allowAccess` array is replaced.
+The scheduler currently always writes legacy `allowAccess` rules. If the source
+contains `accessControl`, that field is removed; its modern defaults and overrides
+are not converted. Configure all required sessions before submitting. The UI and
+PR description identify this replacement. Other assessment fields are preserved.
 
 ### Run
 

@@ -1161,6 +1161,12 @@ if st.session_state.hydrated_target_key != target_key:
     st.session_state.next_rule_seq = max(1, len(editable_rules) + 1)
 
 st.header("Step 3 — Edit Existing Access Rules")
+if "accessControl" in st.session_state.base_json_snapshot:
+    st.warning(
+        "This assessment uses accessControl. This scheduler will remove it and "
+        "replace it with the legacy allowAccess schedule configured below. "
+        "Existing modern rules are not converted; configure all required sessions before submitting."
+    )
 st.caption(
     "Loaded from the repository default branch. You can fully edit each session "
     "(time window, UIDs, password, limits), delete blocks, or append new blocks."
@@ -1574,6 +1580,13 @@ pr_body_preview = build_pr_body_with_diff(
     final_allow_access,
     selected_tz_name,
 )
+if "accessControl" in st.session_state.base_json_snapshot:
+    pr_body_preview = (
+        "**Access format replacement:** Removes the existing `accessControl` field "
+        "and writes the configured legacy `allowAccess` schedule. "
+        "Modern defaults and overrides are not migrated or retained.\n\n"
+        + pr_body_preview
+    )
 
 with st.expander("Pull Request preview", expanded=True):
     st.markdown(pr_body_preview)
@@ -1604,6 +1617,8 @@ if st.button(
         st.stop()
 
     base_json = copy.deepcopy(st.session_state.base_json_snapshot)
+    # Temporary legacy-only workflow: never emit both access formats.
+    base_json.pop("accessControl", None)
     base_json["allowAccess"] = final_allow_access
     updated_content = json.dumps(base_json, indent=2, ensure_ascii=False)
 
@@ -1648,12 +1663,7 @@ if st.button(
             st.stop()
 
     pr_title = f"Scheduler sync: Update access rules for {selected_assessment}"
-    pr_body = build_pr_body_with_diff(
-        selected_assessment,
-        diff_summary,
-        final_allow_access,
-        selected_tz_name,
-    )
+    pr_body = pr_body_preview
 
     with st.spinner("Creating Pull Request..."):
         try:
