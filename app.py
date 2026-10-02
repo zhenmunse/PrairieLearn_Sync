@@ -21,6 +21,7 @@ import streamlit as st
 from github import Github, GithubException, UnknownObjectException
 
 from audit_log import audit
+from github_login import github_login_submission
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -887,29 +888,10 @@ def disconnect():
 with st.sidebar:
     st.header("Step 1 — GitHub Authentication")
 
-    repo_url_input = st.text_input(
-        "Repository URL",
-        key="github_repo_url",
-        placeholder="https://github.com/owner/pl-course-repo",
-        help="Full URL of the PrairieLearn course repository on GitHub.",
-    ) or ""
-
-    pat_input = st.text_input(
-        "Personal Access Token (PAT)",
-        key="github_pat",
-        type="password",
-        autocomplete="current-password",
-        help=(
-            "A GitHub PAT with Contents (Read & Write) and "
-            "Pull Requests (Read & Write) permissions."
-        ),
-    ) or ""
-
-    connect_clicked = st.button(
-        "Connect", type="primary", width='stretch'
-    )
-
-    if connect_clicked:
+    login_submission = github_login_submission()
+    if login_submission:
+        repo_url_input = login_submission["repo_url"]
+        pat_input = login_submission["pat"]
         if not repo_url_input.strip() or not pat_input.strip():
             st.error("Both the Repository URL and a PAT are required.")
         else:

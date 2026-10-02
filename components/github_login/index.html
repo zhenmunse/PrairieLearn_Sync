@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { --text: #31333f; --background: #fff; --primary: #ff4b4b; --font: sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--text); font-family: var(--font); font-size: 14px; }
+    form { display: grid; gap: 16px; padding: 2px; }
+    label { display: block; margin-bottom: 8px; }
+    input { width: 100%; min-width: 0; padding: 12px; border: 1px solid #80808040;
+      border-radius: 8px; color: var(--text); background: var(--background); font: inherit; }
+    input:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+    .password { display: flex; gap: 4px; }
+    button { cursor: pointer; border-radius: 8px; font: inherit; padding: 10px 12px; }
+    #visibility { border: 1px solid #80808040; background: var(--background); color: var(--text); }
+    button[type=submit] { width: 100%; border: none; background: var(--primary); color: white; font-weight: 600; }
+    #error { color: #d32f2f; margin: 0; }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <!-- No value attributes: only the browser/password manager fills this form. -->
+  <form id="github-login" method="post" autocomplete="on">
+    <div>
+      <label for="repo-url">Repository URL</label>
+      <input id="repo-url" name="username" type="text" autocomplete="username"
+        placeholder="https://github.com/owner/pl-course-repo" required spellcheck="false">
+    </div>
+    <div>
+      <label for="pat">Personal Access Token (PAT)</label>
+      <div class="password">
+        <input id="pat" name="password" type="password" autocomplete="current-password" required>
+        <button id="visibility" type="button" aria-label="Show token" aria-pressed="false">Show</button>
+      </div>
+    </div>
+    <p id="error" role="alert" hidden></p>
+    <button type="submit">Connect</button>
+  </form>
+  <script>
+    const form = document.getElementById("github-login");
+    const token = document.getElementById("pat");
+    const error = document.getElementById("error");
+    const parentOrigin = new URL(document.referrer || location.href).origin;
+    function send(type, payload = {}) {
+      window.parent.postMessage({isStreamlitMessage: true, type, ...payload}, parentOrigin);
+    }
+    function resize() {
+      send("streamlit:setFrameHeight", {height: document.body.scrollHeight + 6});
+    }
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      // Read the actual DOM at click/Enter time. Autofill need not emit events.
+      const data = new FormData(form);
+      const repo_url = String(data.get("username") || "").trim();
+      const pat = String(data.get("password") || "").trim();
+      if (!repo_url || !pat) {
+        error.textContent = "Both the Repository URL and a PAT are required.";
+        error.hidden = false;
+        resize();
+        return;
+      }
+      error.hidden = true;
+      send("streamlit:setComponentValue", {
+        dataType: "json",
+        value: {repo_url, pat, submission_id: Array.from(
+          crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16)
+        ).join("-")}
+      });
+      resize();
+    });
+    document.getElementById("visibility").addEventListener("click", event => {
+      const show = token.type === "password";
+      token.type = show ? "text" : "password";
+      event.currentTarget.textContent = show ? "Hide" : "Show";
+      event.currentTarget.setAttribute("aria-label", show ? "Hide token" : "Show token");
+      event.currentTarget.setAttribute("aria-pressed", String(show));
+    });
+    window.addEventListener("message", event => {
+      if (event.source !== window.parent || event.origin !== parentOrigin || event.data?.type !== "streamlit:render") return;
+      const theme = event.data.theme;
+      if (theme) {
+        const style = document.documentElement.style;
+        style.setProperty("--text", theme.textColor);
+        style.setProperty("--background", theme.backgroundColor);
+        style.setProperty("--primary", theme.primaryColor);
+        style.setProperty("--font", theme.font);
+      }
+      resize();
+    });
+    new ResizeObserver(resize).observe(form);
+    send("streamlit:componentReady", {apiVersion: 1});
+    resize();
+  </script>
+</body>
+</html>
