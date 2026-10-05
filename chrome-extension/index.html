@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roster Bridge · PrairieLearn</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.mjs"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="index.html"><span class="mark">rb</span> ROSTER BRIDGE</a><span class="local"><span></span> LOCAL PROCESSING</span><button id="reset" class="quiet">Clear session</button></header>
+  <main>
+    <section class="intro"><div><p class="eyebrow">CANVAS → PRAIRIELEARN</p><h1>A roster. Ready for labels.</h1><p class="lede">Turn your Canvas sections into a PrairieLearn label CSV.<br>Set up the semester here. Schedule each quiz in PrairieLearn.</p></div><div class="edition">01 / ROSTER TOOLS<br><span>Chrome + Edge</span></div></section>
+    <div class="layout"><div class="workflow">
+      <section class="panel"><div class="section-title"><span class="step">01</span><div><h2>Bring your roster</h2><p>CSV files stay in this tab. No account or token required.</p></div></div>
+        <div class="file-grid">
+          <label class="filebox"><span class="file-icon">↥</span><strong>Canvas roster</strong><span>Required · CSV with email and section columns</span><input id="roster-file" type="file" accept=".csv,text/csv"><small id="roster-name">No file selected</small></label>
+          <label class="filebox secondary"><span class="file-icon">＋</span><strong>SDC / additional labels</strong><span>Optional · email + group, or uid,label1,…</span><input id="extra-file" type="file" accept=".csv,text/csv"><small id="extra-name">No file selected</small></label>
+        </div><button id="remove-extra" class="quiet" hidden>Remove additional file</button>
+        <div id="file-error" class="error" role="alert" hidden></div>
+      </section>
+      <section class="panel"><div class="section-title"><span class="step">02</span><div><h2>Match columns & labels</h2><p>Use label names that already exist in your PL course instance.</p></div></div>
+        <p id="mapping-empty" class="empty">Choose a roster to start mapping.</p>
+        <div id="sources"></div>
+        <details class="definitions"><summary>Validate against infoCourseInstance.json <span>optional</span></summary><p>Choose the course file to check exact label names. This does not edit it or assign students.</p><input id="definitions-file" type="file" accept=".json,application/json"><p id="definitions-status"></p><button id="remove-definitions" class="quiet" hidden>Remove label validation file</button></details>
+      </section>
+      <section class="panel"><div class="section-title"><span class="step">03</span><div><h2>Review the student list</h2><p>Repeated emails are combined into one row with all their labels.</p></div></div>
+        <div id="conversion-error" class="error" role="alert" hidden></div>
+        <div id="issues-panel" class="issues" hidden><strong id="issues-title"></strong><p>These rows are excluded from the preview. Fix the source or explicitly accept their exclusion before exporting.</p><div class="table-scroll"><table><thead><tr><th>Source / row</th><th>Email</th><th>Issue</th></tr></thead><tbody id="issues"></tbody></table></div><label class="check"><input id="skip-issues" type="checkbox">I reviewed the issues and want to export only the valid rows.</label></div>
+        <div class="preview-toolbar"><input id="search" type="search" placeholder="Filter by email or label" aria-label="Filter preview"><span id="preview-count">0 students</span></div>
+        <div class="table-scroll preview"><table><thead><tr><th>Student email / UID</th><th>Labels to assign</th></tr></thead><tbody id="preview-body"><tr><td colspan="2" class="empty">Your converted roster will appear here.</td></tr></tbody></table></div>
+        <div class="pagination"><button id="prev" class="quiet" disabled>← Previous</button><span id="page-number">Page 1 of 1</span><button id="next" class="quiet" disabled>Next →</button></div>
+      </section>
+    </div><aside>
+      <section class="export-panel"><p class="eyebrow">EXPORT SUMMARY</p><div class="stats"><div><strong id="student-total">0</strong><span>students</span></div><div><strong id="label-total">0</strong><span>labels</span></div></div><p id="duplicate-note">One row per student.</p><div id="label-summary" class="label-summary"></div>
+        <div class="notice"><strong>This replaces labels in PL.</strong><p>Include every label each student should keep, including accommodations and labels assigned elsewhere. A section-only CSV can remove their other labels.</p></div>
+        <label class="check"><input id="confirm" type="checkbox">I checked the full label sets and confirmed these label names exist in PL.</label>
+        <button id="download" class="primary" disabled>Download PL CSV <span>↓</span></button><button id="copy" class="outline" disabled>Copy CSV</button><p id="export-status" role="status" aria-live="polite"></p>
+        <p class="privacy">Files are held in memory only. Reloading or closing this tab clears your work. Exported files and copied text remain yours to manage.</p>
+      </section>
+      <section class="next-steps"><p class="eyebrow">NEXT, IN PRAIRIELEARN</p><ol><li>Create any missing labels in your course instance.</li><li>Open <strong>Students → Manage enrollments → Synchronize student list → CSV</strong> and paste the CSV.</li><li>Click <strong>Compare</strong>. Review label changes and any invitations or enrollment removals before applying.</li></ol><p>For each quiz, set the time window and password using label overrides on its Access page. SDC labels do not automatically multiply exam duration.</p><a href="https://github.com/PrairieLearn/PrairieLearn/pull/15909" target="_blank" rel="noreferrer">Official CSV format ↗</a></section>
+    </aside></div>
+    <footer>ROSTER BRIDGE <span>Independent tool for PrairieLearn · v0.1.0</span></footer>
+  </main>
+</body>
+</html>

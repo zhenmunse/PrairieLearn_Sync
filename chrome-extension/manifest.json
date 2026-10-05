@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "PrairieLearn Roster Bridge",
+  "version": "0.1.0",
+  "description": "Convert Canvas rosters and optional accommodation lists to PrairieLearn student-label CSV, entirely on your device.",
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "action": { "default_title": "Open Roster Bridge", "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" } },
+  "background": { "service_worker": "background.js" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'"
+  }
+}
