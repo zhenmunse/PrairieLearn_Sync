@@ -37,6 +37,7 @@ from pl_api_client import (
     SessionRecord,
 )
 from audit_log import audit
+from compliance_footer import render_compliance_footer
 
 # ============================================================================
 # Page config (must be the first Streamlit command)
@@ -47,6 +48,8 @@ st.set_page_config(
     page_icon=None,
     layout="wide",
 )
+
+render_compliance_footer()
 
 # ============================================================================
 # Constants
@@ -647,6 +650,8 @@ def render_event_log(events: list[SessionEvent], tz_name: str) -> None:
             "Last Active": _fmt_time_for_tz(ev.last_active, tz_name),
         })
     st.dataframe(rows, width='stretch', hide_index=True, height=320)
+    st.caption("Live data is fetched from PrairieLearn for this view, not saved to a local exam cache. "
+               "Use the table toolbar to explicitly download the displayed records to your browser.")
 
 
 # ============================================================================
@@ -804,7 +809,7 @@ def main() -> None:
     elif use_manual:
         if pl_token and selected_ci_id and selected_a_id:
             # Log CCTV access (first load only per session key)
-            _access_key = f"cctv_manual_{selected_ci_id}_{selected_a_id}"
+            _access_key = "cctv_manual_accessed"
             if _access_key not in st.session_state:
                 st.session_state[_access_key] = True
                 audit(
@@ -850,30 +855,6 @@ def main() -> None:
             st.warning("No data returned from PrairieLearn API. Showing empty map.")
     seat_states = resolve_seat_states(seats, events, roster_set, tz_name)
     alerts = detect_anomalies(events, roster_set, ip_seat_map)
-
-    # Audit-log alerts and event log for non-Mock modes
-    if not use_mock and alerts:
-        audit(
-            "cctv_alert",
-            detail=f"{len(alerts)} anomal(ies) detected",
-            meta={
-                "count": len(alerts),
-                "summaries": [
-                    {"severity": a.severity, "message": a.message}
-                    for a in alerts[:20]
-                ],
-            },
-        )
-    if not use_mock and events:
-        audit(
-            "cctv_event_log",
-            detail=f"{len(events)} session event(s)",
-            meta={
-                "total": len(events),
-                "in_progress": sum(1 for e in events if e.status == "in_progress"),
-                "submitted": sum(1 for e in events if e.status == "submitted"),
-            },
-        )
 
     # ------------------------------------------------------------------
     # Compute KPI values

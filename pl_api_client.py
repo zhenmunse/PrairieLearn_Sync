@@ -14,9 +14,8 @@ variables as a fallback:
     ASSESSMENT_ID         Numeric assessment ID
 
 The main public entry point is ``fetch_live_exam_status()`` which returns a
-list of ``SessionRecord`` dicts ready for the CCTV dashboard.  It is wrapped
-with ``@st.cache_data(ttl=15)`` so the upstream API is polled at most once
-every 15 seconds.
+list of ``SessionRecord`` dicts ready for the CCTV dashboard. Data is fetched
+on each page run and is not cached or written to disk by this client.
 """
 
 from __future__ import annotations
@@ -120,22 +119,22 @@ def _safe_get(
         return resp.json()
     except requests.exceptions.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "N/A"
-        logger.error("PL API HTTP %s for %s: %s", status, url, exc)
+        logger.error("PL API HTTP request failed (status %s)", status)
         st.error(
             f"PrairieLearn API returned HTTP {status}. "
             "Check your API token and IDs."
         )
     except requests.exceptions.ConnectionError:
-        logger.error("Connection error reaching %s", url)
+        logger.error("PL API connection failed")
         st.error("Cannot reach the PrairieLearn server. Check your network.")
     except requests.exceptions.Timeout:
-        logger.error("Request to %s timed out", url)
+        logger.error("PL API request timed out")
         st.error("PrairieLearn API request timed out. Retrying next cycle.")
     except requests.exceptions.RequestException as exc:
-        logger.error("Unexpected request error: %s", exc)
-        st.error(f"Unexpected API error: {exc}")
+        logger.error("PL API request failed")
+        st.error("PrairieLearn API request failed. Check your connection and settings.")
     except ValueError:
-        logger.error("Failed to decode JSON from %s", url)
+        logger.error("PL API response was not valid JSON")
         st.error("Received invalid JSON from PrairieLearn API.")
     return None
 
@@ -149,7 +148,6 @@ def _safe_get(
 # https://us.prairielearn.com/pl/course_instance/{ID}/instructor/assessments).
 
 
-@st.cache_data(ttl=300, show_spinner="Loading assessments...")
 def fetch_assessments(
     token: str,
     base_url: str,
@@ -159,7 +157,7 @@ def fetch_assessments(
     GET /pl/api/v1/course_instances/{cid}/assessments
 
     Returns a list of assessment dicts for a specific course instance.
-    Cached for 5 minutes, partitioned by token and request parameters.
+    Fetched on demand; no shared or persistent cache.
     """
     session = _build_session(token)
     url = f"{base_url}/pl/api/v1/course_instances/{course_instance_id}/assessments"
@@ -317,7 +315,6 @@ def _extract_latest_ip(events: list[dict[str, Any]]) -> tuple[str | None, str | 
 # ============================================================================
 
 
-@st.cache_data(ttl=15, show_spinner="Fetching live data from PrairieLearn...")
 def fetch_live_exam_status(
     token: str,
     base_url: str,
@@ -328,14 +325,13 @@ def fetch_live_exam_status(
     Fetch assessment instances and their latest IPs, returning a cleaned list
     of ``SessionRecord`` dicts.
 
-    Cached for 15 seconds to respect PrairieLearn API rate limits.  On any
+    Fetched on demand without a server-side data cache. On any
     failure the function returns an empty list so the UI degrades gracefully.
 
     Parameters
     ----------
     token : str
-        PL API token. Included in Streamlit's hashed cache key so another
-        credential cannot reuse this token's authorized response.
+        PL API token used only for the current request.
     base_url : str
         PrairieLearn server URL (no trailing slash).
     course_instance_id : str
@@ -404,7 +400,7 @@ def fetch_live_exam_status(
                 uid, ip, last_active = fut.result()
                 ip_map[uid] = (ip, last_active)
             except Exception as exc:
-                logger.warning("Failed to fetch one assessment-instance log: %s", exc)
+                logger.warning("PL API session event request failed")
 
     # Step 3: Assemble final output
     output: list[SessionRecord] = []

@@ -140,7 +140,7 @@ local wall-clock time, so match the course instance's timezone in PL.
 4. Find **Course Instance ID** in the PL URL's `/course_instance/12345/` segment.
    Enter that number and select the exam from the **Assessment** list.
 5. Choose the display timezone and optionally enable **Auto-refresh (5 s)**.
-   API caching can make fresh data arrive less often than the page refresh interval.
+   Each refresh fetches fresh data from PL; there is no server-side exam-data cache.
 6. **IP Overview** shows configured IP addresses and the full emails of students
    currently taking an exam. Cards do not correspond to physical seats.
    **No active exam** means no in-progress exam is shown for that IP; submitted
@@ -297,3 +297,22 @@ python sync_pipeline.py --csv temp-data/ECS_32A_TEST26_Q2_points_by_username.csv
   access-controlled deployment; **Manual** mode uses each visitor's own token.
 - `.pl_credentials.json`, `.streamlit/`, `logs/`, and CSV data are ignored.
 - Generated `infoAssessment.json` files may contain student identifiers; review course and institution data policies before committing them.
+
+## Privacy and audit behavior
+
+The Streamlit pages include a shared compliance notice. Audit records contain
+only an allowlisted operation type and UTC timestamp. Caller-supplied credentials,
+identifiers, file names, repository details, payloads and monitoring records are
+not written to this log. PL request errors omit URLs and exception payloads.
+Live CCTV fetches assessment lists and live records on demand without caching
+responses. Its event table offers a browser download only when the user chooses
+that toolbar action. No background collector runs when the page is not in use.
+Transient session state and the current rendered view still reside in memory;
+this is not a claim that the browser or hosting infrastructure has no retention.
+User-requested GitHub PRs and downloads persist at their intended destinations.
+
+Restart the deployed application after upgrading to discard previous process
+caches and active sessions. Existing audit logs and legacy credential files from
+older versions are not retroactively sanitized; arrange their cleanup separately.
+
+Copyright © Zonglin Han 2025-2026. All rights reserved. | [MIT License](LICENSE)

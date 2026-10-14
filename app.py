@@ -21,6 +21,7 @@ import streamlit as st
 from github import Github, GithubException, UnknownObjectException
 
 from audit_log import audit
+from compliance_footer import render_compliance_footer
 from github_login import github_login_submission
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,8 @@ st.set_page_config(
     page_icon=None,
     layout="wide",
 )
+
+render_compliance_footer()
 
 # ---------------------------------------------------------------------------
 # Session state initialization
